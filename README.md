@@ -3,6 +3,8 @@
 A functional CHIP-8 + SUPER-CHIP emulator in C++17 with SFML 3, featuring a
 real-time debugger sidebar, ROM picker, save states, and rewind.
 
+![CHIP-8 emulator running IBM Logo with the live debugger sidebar](screenshots/debugger.png)
+
 ## Features
 
 - All 35 standard CHIP-8 opcodes + the full SUPER-CHIP 1.1 extension set
