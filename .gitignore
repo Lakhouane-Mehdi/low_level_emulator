@@ -1,0 +1,70 @@
+# --- Build output ---
+build/
+out/
+cmake-build-*/
+bin/
+lib/
+Debug/
+Release/
+x64/
+x86/
+
+# --- CMake ---
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+_deps/
+
+# --- MSVC / Visual Studio ---
+*.vcxproj.user
+*.suo
+*.sdf
+*.opensdf
+*.ipch
+*.aps
+*.pch
+*.pdb
+*.idb
+*.obj
+*.ilk
+*.exp
+*.log
+*.tlog
+.vs/
+ipch/
+
+# --- MinGW / GCC / Clang ---
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.gch
+*.d
+
+# --- IDE / editor settings ---
+# Personal IntelliSense paths leak machine-specific absolute paths;
+# committing a template instead is fine, but the live file should be ignored.
+.vscode/c_cpp_properties.json
+.vscode/settings.json
+.vscode/launch.json
+.vscode/ipch/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- vcpkg ---
+vcpkg_installed/
+.vcpkg-root
+
+# --- Misc ---
+*.bak
+*.tmp
+*.orig
