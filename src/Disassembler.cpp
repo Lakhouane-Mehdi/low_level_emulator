@@ -23,6 +23,12 @@ std::string disassemble(uint16_t op) {
     case 0x0000:
         if (nn == 0xE0) return "CLS";
         if (nn == 0xEE) return "RET";
+        if ((nn & 0xF0) == 0xC0) return fmt("SCD %X", n);
+        if (nn == 0xFB) return "SCR";
+        if (nn == 0xFC) return "SCL";
+        if (nn == 0xFD) return "EXIT";
+        if (nn == 0xFE) return "LOW";
+        if (nn == 0xFF) return "HIGH";
         return fmt("SYS %03X", nnn);
     case 0x1000: return fmt("JP %03X", nnn);
     case 0x2000: return fmt("CALL %03X", nnn);
@@ -61,9 +67,12 @@ std::string disassemble(uint16_t op) {
         case 0x18: return fmt("LD ST, V%X", x);
         case 0x1E: return fmt("ADD I, V%X", x);
         case 0x29: return fmt("LD F, V%X", x);
+        case 0x30: return fmt("LD HF, V%X", x);
         case 0x33: return fmt("LD B, V%X", x);
         case 0x55: return fmt("LD [I], V%X", x);
         case 0x65: return fmt("LD V%X, [I]", x);
+        case 0x75: return fmt("LD R, V%X", x);
+        case 0x85: return fmt("LD V%X, R", x);
         }
         break;
     }
