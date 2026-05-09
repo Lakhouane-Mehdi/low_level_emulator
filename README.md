@@ -1,31 +1,36 @@
-# CHIP-8 / SUPER-CHIP Emulator
+# CHIP-8 / SUPER-CHIP / MX-8 Emulator
 
-A functional CHIP-8 + SUPER-CHIP emulator in C++17 with SFML 3, featuring a
-real-time debugger sidebar, ROM picker, save states, and rewind.
+A C++17 emulator + interactive debugger + Python assembler for CHIP-8,
+SUPER-CHIP 1.1, and **MX-8** — six original opcodes layered on top of the
+classic ISA.
 
 ![CHIP-8 emulator running IBM Logo with the live debugger sidebar](screenshots/debugger.png)
 
-## Features
+## What's in the box
 
-- All 35 standard CHIP-8 opcodes + the full SUPER-CHIP 1.1 extension set
-  (128x64 hi-res mode, 16x16 sprites, scroll, big font, RPL flags, exit)
-- 64x32 lo-res or 128x64 hi-res, scaled to a 768x384 game window
-- 60Hz timers, 600Hz CPU, square-wave 440Hz beep on the sound timer
-- 16-key hex keypad mapped to the keyboard
-- **Live debugger sidebar**: registers V0-VF, PC, I, SP, timers, next 5
-  disassembled instructions, full stack, and a 32-byte memory window
-  centered on the index register I
-- **Pause + single-step** execution
-- **Save state + rewind**: F5 saves, F9 loads, hold Backspace to rewind up
-  to 5 seconds of history
-- **ROM picker**: launch with no arguments to get a clickable menu of every
-  `.ch8` file in the `roms/` folder
-- **Quirks toggle**: switch between modern (SCHIP) and legacy (COSMAC VIP)
-  behavior for the ambiguous shift and load/store opcodes
+- **Pure emulator core** in `src/core/` (no graphics, no I/O coupling).
+  35 standard CHIP-8 opcodes + the full SUPER-CHIP 1.1 set (hi-res 128x64,
+  16x16 sprites, scroll D/U/L/R, big font, RPL flags, exit) +
+  6 MX-8 extensions.
+- **Live debugger sidebar**: registers, disassembly with breakpoint markers,
+  stack, three memory panes, instruction trace ring buffer, status line.
+- **Real debugger controls**: pause / step / step-over CALL / step-out,
+  set/clear breakpoints, mid-execution memory editor.
+- **Save state + 5-second rewind** on a ring buffer.
+- **Granular quirks**: each of 7 CHIP-8 quirks toggleable independently
+  (F1-F7), or one-shot to MODERN (F8) / VIP (F12) presets.
+- **MX-8 ISA extension** (F11) — see below.
+- **7 color palettes** (F10 cycles, or `--palette name`).
+- **ROM browser** with paging, scroll, click-to-pick.
+- **Python assembler** at `tools/asm.py` — labels, .org, .db, .dw, .ascii,
+  .equ, full CHIP-8 + SCHIP + MX-8 mnemonics. Includes a self-test
+  (`tools/test_asm.py`) covering all 54 opcodes.
+- **Cross-platform font fallback** — bundled / Windows / Linux / macOS paths.
+- **Configurable speed** (1..2000 cycles/frame, live `+/-`).
 
-## Build (vcpkg + Visual Studio 2022, Windows)
+## Build (Windows / vcpkg / Visual Studio 2022)
 
-```bash
+```
 vcpkg install sfml:x64-windows
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ^
       -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
@@ -33,23 +38,39 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ^
 cmake --build build --config Release
 ```
 
-The post-build step copies `roms/` next to `chip8.exe` and vcpkg auto-deploys
-all required SFML DLLs.
+Linux/macOS work with the same CMakeLists once you point CMake at an SFML 3
+install. The post-build step copies `roms/` and `assets/` next to the
+binary; vcpkg auto-deploys SFML DLLs.
 
 ## Run
 
-```bash
-# launch the ROM picker
+```
+# ROM picker (lists every .ch8 under roms/ recursively)
 ./build/Release/chip8.exe
 
-# or load a specific ROM
+# Specific ROM
 ./build/Release/chip8.exe roms/PONG.ch8
+
+# Tweak everything
+./build/Release/chip8.exe roms/TETRIS.ch8 --speed 25 --palette amber --legacy
+
+# Run an MX-8 demo (custom opcodes enabled)
+./build/Release/chip8.exe roms/mx8_demo.ch8 --mx8 --paused
 ```
 
-Bundled ROMs are public-domain. Many more at
-https://github.com/kripod/chip8-roms
+CLI:
 
-## Controls
+| Flag | Meaning |
+|---|---|
+| `--speed N`        | CPU cycles per frame (1..2000, default 12) |
+| `--legacy`         | Boot with COSMAC VIP quirks |
+| `--mx8`            | Enable MX-8 custom opcodes from start |
+| `--paused`         | Boot paused |
+| `--palette NAME`   | mono / amber / green / gameboy / c64 / ice / hotdog |
+| `--rewind-sec N`   | Seconds of rewind history (default 5) |
+| `--roms-dir DIR`   | Where the picker scans (default `roms`) |
+
+## Hotkeys
 
 ### Game keypad
 
@@ -61,41 +82,102 @@ CHIP-8           Keyboard
 A 0 B F          Z X C V
 ```
 
-### Emulator hotkeys
+### Emulator + debugger
 
 | Key | Action |
 |---|---|
-| `Esc` | Quit |
-| `Space` | Pause / resume |
-| `N` | Single-step one instruction (while paused) |
-| `F1` | Toggle quirks: modern vs. legacy COSMAC VIP behavior |
-| `F5` | Save state |
-| `F9` | Load saved state |
-| `Backspace` | Hold to rewind (5 seconds of history) |
+| `Esc`           | Quit |
+| `Space`         | Pause / resume |
+| `N`             | Single step (paused) |
+| `O`             | Step over a `CALL` (otherwise same as N) |
+| `Enter`         | Step out — run until `RET` drops the SP |
+| `B`             | Toggle execution breakpoint at current PC |
+| `Shift+B`       | Clear all breakpoints |
+| `W` (paused)    | Cycle memory watchpoint at cursor: none → R → W → RW → none |
+| `Shift+W` (paused) | Clear all watchpoints |
+| `F1`..`F7`      | Toggle each quirk independently (shift, ldst, jp-vx, vfreset, dispwait, clip) |
+| `F8`            | Quirks → MODERN preset (SCHIP) |
+| `F12`           | Quirks → LEGACY preset (COSMAC VIP) |
+| `F11`           | Toggle MX-8 extensions |
+| `F10`           | Cycle palette |
+| `F5` / `F9`     | Save / load state |
+| `Backspace` (hold) | Rewind |
+| `+` / `-`       | Faster / slower CPU |
+| `Tab`           | Mute beep |
+| `P`             | Reset CPU |
+| `M`             | Cycle memory pane (I / PC / cursor) |
+| `Arrows`        | Move memory cursor (paused) |
+| `[` / `]`       | Decrement / increment byte at cursor |
 
-### Debugger sidebar
+## The MX-8 extension
 
-Always visible on the right of the window:
+Six original opcodes activated by `F11` or `--mx8`. Encoded into unused
+slots so they can't collide with classic CHIP-8 / SCHIP ROMs:
 
-- Top: emulator status, hotkey reminders, current quirks/resolution mode
-- PC, I, SP, DT (delay), ST (sound) timers
-- All 16 V-registers in a 4x4 grid
-- Next 5 disassembled instructions, current PC marked `>`
-- Full stack with `>` next to current SP
-- 32-byte memory window centered on the index register I, with the byte at
-  I bracketed `[..]` so you can watch sprite data being read by `DXYN`
+| Opcode | Mnemonic        | Effect                                                     |
+|--------|-----------------|------------------------------------------------------------|
+| `5XY1` | `MUL Vx, Vy`    | `Vx = (Vx * Vy) & 0xFF`, `VF = (Vx * Vy) >> 8` (overflow)  |
+| `5XY2` | `DIV Vx, Vy`    | `Vx = Vx / Vy`, `VF = Vx % Vy`. `VF = 0xFF` if `Vy == 0`.  |
+| `5XY3` | `SWAP Vx, Vy`   | Exchange `Vx` and `Vy` in one cycle.                       |
+| `FX50` | `MEMCPY n`      | Copy `n = X+1` bytes from `[I]` to `[I + n]`.              |
+| `FX60` | `MEMSET n`      | Fill `n = X+1` bytes at `[I]` with `V0`.                   |
+| `FX70` | `RNDSEED n`     | Seed PRNG using `V0..V(n-1)` packed.                       |
+
+These plug holes the original ISA leaves: there's no native multiply, no
+fast block fill/copy, and no way to make RNG deterministic for testing.
+
+## Assembler
+
+```
+python tools/asm.py demos/hello.asm -o demos/hello.ch8
+python tools/asm.py demos/maze.asm  --listing --symbols
+python tools/test_asm.py                        # self-test, 54 cases
+```
+
+Syntax:
+
+```asm
+    .equ HIGH_X, 0x3C
+main:
+    CLS
+    LD V0, HIGH_X
+    LD I, sprite
+    DRW V0, V1, 5
+loop:
+    JP loop
+sprite:
+    .db 0xF0, 0x90, 0x90, 0x90, 0xF0
+```
+
+Numbers: `12`, `0x12`, `$12`, `0b1010`, `%1010`. Labels are case-sensitive.
+Mnemonics are case-insensitive. See `demos/*.asm` for working examples
+(`hello`, `maze`, `bounce`, `mx8_demo`).
 
 ## Project layout
 
 ```
 src/
-  Chip8.hpp / .cpp        CPU, memory, opcodes, snapshots
-  Disassembler.hpp / .cpp Opcode -> mnemonic
-  main.cpp                SFML window, audio, input, debugger sidebar
-roms/                     Public-domain test ROMs
-CMakeLists.txt
+  core/      Chip8, Disassembler        # pure emulator, no SFML
+  ui/        Renderer, Input, AudioBeep, DebugView, RomBrowser, FontLoader
+  app/       Config, App                # main loop + orchestration
+  main.cpp                              # tiny CLI entry point
+tools/
+  asm.py                                # CHIP-8 assembler
+  test_asm.py                           # 54-case self-test
+demos/                                  # .asm sources
+roms/
+  *.ch8                                 # public-domain games + assembled demos
+  tests/                                # Timendus's CHIP-8 test suite
+assets/fonts/                           # bundled font(s) — optional
 ```
+
+## Verifying accuracy
+
+Drop your favorite test ROMs into `roms/tests/` and pick from the browser.
+The bundled `roms/tests/` already contains Timendus's full eight-stage
+CHIP-8 test suite (chip8-logo, ibm-logo, corax+, flags, quirks, keypad,
+beep, scrolling).
 
 ## Author
 
-Made by Mehdi Lakhouane
+Made by Mehdi Lakhouane.

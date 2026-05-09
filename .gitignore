@@ -64,6 +64,10 @@ Thumbs.db
 vcpkg_installed/
 .vcpkg-root
 
+# --- Python (assembler/test tools) ---
+__pycache__/
+*.pyc
+
 # --- Misc ---
 *.bak
 *.tmp
