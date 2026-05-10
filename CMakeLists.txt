@@ -54,11 +54,8 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/assets")
                 ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:chip8>/assets)
 endif()
 
-# Headless core test runner — no SFML, links only against src/core/.
-# Run via: cmake --build build --config Release --target chip8_test
-#         build/Release/chip8_test.exe
-add_executable(chip8_test
-    tests/core_test.cpp
+# Common headless core sources shared by chip8_test and chip8_run.
+set(CHIP8_CORE_SOURCES
     src/core/Chip8.cpp
     src/core/Memory.cpp
     src/core/Disassembler.cpp
@@ -67,6 +64,16 @@ add_executable(chip8_test
     src/core/isa/SchipISA.cpp
     src/core/isa/Mx8ISA.cpp
 )
+
+# Headless core test runner — no SFML, links only against src/core/.
+# Run via: cmake --build build --config Release --target chip8_test
+#         build/Release/chip8_test.exe
+add_executable(chip8_test tests/core_test.cpp ${CHIP8_CORE_SOURCES})
 target_include_directories(chip8_test PRIVATE src)
 enable_testing()
 add_test(NAME core COMMAND chip8_test)
+
+# Headless ROM runner — for CI / fuzzing / regression suites.
+# Run via: build/Release/chip8_run.exe rom.ch8 --frames N [...]
+add_executable(chip8_run tools/chip8_run.cpp ${CHIP8_CORE_SOURCES})
+target_include_directories(chip8_run PRIVATE src)

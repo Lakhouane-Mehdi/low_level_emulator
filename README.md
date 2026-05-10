@@ -176,6 +176,26 @@ choice, palette) and UI mode (paused / step / rewind) stay direct.
 
 See `src/core/CoreEvents.hpp` for the full type list.
 
+## Headless runner & regression suite
+
+`chip8_run` is a no-SFML CLI for CI / fuzzing / regression testing.
+
+```
+build/Release/chip8_run.exe rom.ch8 --frames 600 --print-hash
+build/Release/chip8_run.exe rom.ch8 --frames 600 --expect-hash 0xFA6CE8F707AC1F88
+build/Release/chip8_run.exe rom.ch8 --frames 60 --isa schip --quirks legacy --seed 42
+```
+
+Exit codes: 0 = success, 1 = hash mismatch, 2 = halted before frame count, 3 = CLI/load error.
+
+`tools/test_headless.py` runs `chip8_run` against a fixed set of (ROM, args, golden hash)
+tuples — wired in for CI:
+
+```
+python tools/test_headless.py             # verify
+python tools/test_headless.py --update    # regenerate golden hashes
+```
+
 ## Project layout
 
 ```
