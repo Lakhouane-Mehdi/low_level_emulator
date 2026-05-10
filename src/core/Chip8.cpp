@@ -244,6 +244,71 @@ uint16_t Chip8::fetchOpcode(uint16_t addr) const {
     return static_cast<uint16_t>((mem.peek(addr) << 8) | mem.peek(addr + 1));
 }
 
+namespace {
+// FNV-1a 64 over a contiguous byte range. Reused for every component hash.
+constexpr uint64_t FNV_OFFSET_64 = 0xCBF29CE484222325ULL;
+constexpr uint64_t FNV_PRIME_64  = 0x100000001B3ULL;
+inline uint64_t fnv1a(const void* data, std::size_t n, uint64_t seed = FNV_OFFSET_64) {
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    uint64_t h = seed;
+    for (std::size_t i = 0; i < n; ++i) { h ^= p[i]; h *= FNV_PRIME_64; }
+    return h;
+}
+} // namespace
+
+Chip8::StateDigest Chip8::stateDigest() const {
+    StateDigest d;
+
+    // Framebuffer (already exists; kept as its own component).
+    d.framebuffer_hash = framebufferHash();
+
+    // Whole memory image. The Memory wrapper has a snapshot path for this
+    // — use it so we go through the official accessor, not raw bytes.
+    std::array<uint8_t, Memory::SIZE> mem_image{};
+    mem.snapshot_to(mem_image);
+    d.mem_hash = fnv1a(mem_image.data(), mem_image.size());
+
+    // Registers V0..VF.
+    d.regs_hash = fnv1a(v.data(), v.size());
+
+    // Stack — only the live portion [0, sp). FNV over uint16_t bytes.
+    d.stack_hash = fnv1a(stack.data(), static_cast<std::size_t>(sp) * sizeof(uint16_t));
+
+    // RNG state — 4 × uint64_t.
+    d.rng_hash = fnv1a(&rng.s, sizeof(rng.s));
+
+    // Captured scalars.
+    d.pc          = pc;
+    d.index       = index;
+    d.sp          = sp;
+    d.delay_timer = delay_timer;
+    d.sound_timer = sound_timer;
+    d.hires       = hires;
+    d.halt_reason = static_cast<uint8_t>(halt_reason);
+
+    // Combined hash — feed every component sub-hash + the scalars so a
+    // change anywhere produces a different state_hash. This is the value
+    // --diff-replay's binary search compares.
+    uint64_t h = FNV_OFFSET_64;
+    auto mix = [&](const void* p, std::size_t n) { h = fnv1a(p, n, h); };
+    mix(&d.framebuffer_hash, sizeof(d.framebuffer_hash));
+    mix(&d.mem_hash,         sizeof(d.mem_hash));
+    mix(&d.regs_hash,        sizeof(d.regs_hash));
+    mix(&d.stack_hash,       sizeof(d.stack_hash));
+    mix(&d.rng_hash,         sizeof(d.rng_hash));
+    mix(&d.pc,               sizeof(d.pc));
+    mix(&d.index,            sizeof(d.index));
+    mix(&d.sp,               sizeof(d.sp));
+    mix(&d.delay_timer,      sizeof(d.delay_timer));
+    mix(&d.sound_timer,      sizeof(d.sound_timer));
+    uint8_t hires_byte = d.hires ? 1 : 0;
+    mix(&hires_byte,         sizeof(hires_byte));
+    mix(&d.halt_reason,      sizeof(d.halt_reason));
+    d.state_hash = h;
+
+    return d;
+}
+
 uint64_t Chip8::framebufferHash() const {
     // FNV-1a 64. Reduce each pixel to one bit (on/off) before hashing so
     // the hash is renderer-palette-independent: changing color_on/off

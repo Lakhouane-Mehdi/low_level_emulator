@@ -823,6 +823,125 @@ static void test_rewind_empty() {
     CHECK_EQ((int)rb.anchorCount(), 0);
 }
 
+// -------- StateDigest. Stable + component-sensitive --------
+//
+// Note: the digest INCLUDES rng state, and the Chip8 constructor seeds
+// rng from boot entropy, so two fresh CPUs naturally have different
+// digests. All tests below pin the seed explicitly so we're comparing
+// digests across deterministic baselines.
+static void test_state_digest() {
+    std::printf("\n[test_state_digest]\n");
+    auto fresh = []() { Chip8 c; c.setSeed(7); return c; };
+
+    Chip8 a = fresh();
+    Chip8 b = fresh();
+    auto da = a.stateDigest();
+    auto db = b.stateDigest();
+    CHECK_EQ((long long)da.state_hash,       (long long)db.state_hash);
+    CHECK_EQ((long long)da.framebuffer_hash, (long long)db.framebuffer_hash);
+    CHECK_EQ((long long)da.mem_hash,         (long long)db.mem_hash);
+    CHECK_EQ((long long)da.regs_hash,        (long long)db.regs_hash);
+    CHECK_EQ((long long)da.stack_hash,       (long long)db.stack_hash);
+    CHECK_EQ((long long)da.rng_hash,         (long long)db.rng_hash);
+
+    // Stability: idempotent.
+    auto da2 = a.stateDigest();
+    CHECK_EQ((long long)da.state_hash, (long long)da2.state_hash);
+
+    // Mutating each component changes only the relevant sub-hash AND
+    // the combined hash — verifying isolation of localizers.
+
+    // (1) Memory: one byte change -> mem_hash and state_hash differ;
+    //     regs/stack/rng/fb stay the same.
+    {
+        Chip8 c = fresh();
+        c.mem.write(0x300, 0xAA);
+        auto d = c.stateDigest();
+        CHECK(d.mem_hash         != da.mem_hash);
+        CHECK_EQ((long long)d.regs_hash,  (long long)da.regs_hash);
+        CHECK_EQ((long long)d.stack_hash, (long long)da.stack_hash);
+        CHECK_EQ((long long)d.rng_hash,   (long long)da.rng_hash);
+        CHECK_EQ((long long)d.framebuffer_hash, (long long)da.framebuffer_hash);
+        CHECK(d.state_hash       != da.state_hash);
+    }
+
+    // (2) Registers: V5 change -> regs_hash diverges only.
+    {
+        Chip8 c = fresh();
+        c.v[5] = 0x42;
+        auto d = c.stateDigest();
+        CHECK(d.regs_hash != da.regs_hash);
+        CHECK_EQ((long long)d.mem_hash,   (long long)da.mem_hash);
+        CHECK_EQ((long long)d.stack_hash, (long long)da.stack_hash);
+        CHECK(d.state_hash != da.state_hash);
+    }
+
+    // (3) RNG state: setSeed -> rng_hash diverges only.
+    {
+        Chip8 c = fresh();
+        c.setSeed(12345);
+        auto d = c.stateDigest();
+        CHECK(d.rng_hash != da.rng_hash);
+        CHECK_EQ((long long)d.regs_hash, (long long)da.regs_hash);
+        CHECK_EQ((long long)d.mem_hash,  (long long)da.mem_hash);
+        CHECK(d.state_hash != da.state_hash);
+    }
+
+    // (4) Stack: pushing changes both stack_hash and sp/state_hash.
+    {
+        Chip8 c = fresh();
+        c.pushStack(0x250);
+        auto d = c.stateDigest();
+        CHECK(d.stack_hash != da.stack_hash);
+        CHECK_EQ((int)d.sp, 1);
+        CHECK(d.state_hash != da.state_hash);
+    }
+
+    // (5) Framebuffer: lighting one pixel changes framebuffer_hash only.
+    {
+        Chip8 c = fresh();
+        c.display[0] = 0xFFFFFFFF;
+        auto d = c.stateDigest();
+        CHECK(d.framebuffer_hash != da.framebuffer_hash);
+        CHECK_EQ((long long)d.mem_hash,  (long long)da.mem_hash);
+        CHECK_EQ((long long)d.regs_hash, (long long)da.regs_hash);
+        CHECK(d.state_hash != da.state_hash);
+    }
+
+    // (6) Keypad changes do NOT affect the digest — keys are inputs.
+    {
+        Chip8 c = fresh();
+        c.keys[0xA] = 1;
+        auto d = c.stateDigest();
+        CHECK_EQ((long long)d.state_hash, (long long)da.state_hash);
+    }
+}
+
+// -------- StateDigest. Two CPUs that ran the same program are byte-equal --------
+static void test_state_digest_deterministic_program() {
+    std::printf("\n[test_state_digest_deterministic_program]\n");
+    auto run = []() {
+        Chip8 c;
+        c.installISA(&ISA::mx8());
+        c.setSeed(0xDEADBEEF);
+        // Program: LD V0,5; LD V1,3; ADD V0,V1; LD I,0x300; LD [I],V1; JP self
+        // Layout: 200:6005  202:6103  204:8014  206:A300  208:F155  20A:120A
+        std::vector<uint16_t> ops = {0x6005, 0x6103, 0x8014, 0xA300, 0xF155, 0x120A};
+        std::vector<uint8_t> bytes;
+        for (uint16_t w : ops) { bytes.push_back(w >> 8); bytes.push_back(w & 0xFF); }
+        c.loadROMBytes(bytes);
+        c.setSeed(0xDEADBEEF);   // re-seed after loadROM (resets rng pointer)
+        for (int i = 0; i < 6; ++i) c.cycle();
+        return c.stateDigest();
+    };
+    auto a = run();
+    auto b = run();
+    CHECK_EQ((long long)a.state_hash, (long long)b.state_hash);
+    CHECK_EQ((int)a.pc,               (int)b.pc);
+    CHECK_EQ((long long)a.mem_hash,   (long long)b.mem_hash);
+    CHECK_EQ((long long)a.regs_hash,  (long long)b.regs_hash);
+}
+
 // -------- 12. CXNN with NN mask --------
 static void test_rnd_mask() {
     std::printf("\n[test_rnd_mask]\n");
@@ -871,6 +990,8 @@ int main() {
     test_rewind_reconstruction_matches_fresh();
     test_rewind_with_events();
     test_rewind_empty();
+    test_state_digest();
+    test_state_digest_deterministic_program();
     test_rnd_mask();
 
     if (g_failures > 0) {

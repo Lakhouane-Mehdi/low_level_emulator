@@ -192,6 +192,36 @@ public:
     // hash just because the unused bottom half changes.
     uint64_t framebufferHash() const;
 
+    // MachineStateDigest — richer fingerprint for desync diagnostics.
+    // Per-component sub-hashes localize divergence ("RAM differs but regs
+    // don't"); the combined `state_hash` is the cheap one-comparison
+    // value used by --diff-replay binary search.
+    //
+    // Computed on demand (not stored). Cheap enough to compute every frame
+    // (~4KB of FNV at 60Hz = ~250KB/s, no measurable impact). Keypad is
+    // intentionally excluded: keys are an input boundary, not a result of
+    // computation, and the events that drive them are already in replays.
+    struct StateDigest {
+        // Component sub-hashes — used for localizing what diverged.
+        uint64_t framebuffer_hash = 0;
+        uint64_t mem_hash         = 0;
+        uint64_t regs_hash        = 0;   // V0..VF
+        uint64_t stack_hash       = 0;   // stack[0..sp)
+        uint64_t rng_hash         = 0;   // xoshiro256** state
+        // Captured scalars (no point hashing single bytes/words).
+        uint16_t pc              = 0;
+        uint16_t index           = 0;
+        uint8_t  sp              = 0;
+        uint8_t  delay_timer     = 0;
+        uint8_t  sound_timer     = 0;
+        bool     hires           = false;
+        uint8_t  halt_reason     = 0;
+        // Combined hash — mixes all of the above into one 64-bit value.
+        // The cheap per-frame comparison key.
+        uint64_t state_hash      = 0;
+    };
+    StateDigest stateDigest() const;
+
     // ---- ISA management ----
     // CPU does not own the ISA pointer — singletons in IInstructionSet.hpp do.
     // installISA() is null-safe: passing nullptr keeps the previous ISA.
