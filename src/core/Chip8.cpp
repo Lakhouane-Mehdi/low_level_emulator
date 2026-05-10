@@ -111,6 +111,7 @@ void Chip8::installISA(IInstructionSet* isa) {
 // enqueue [Reset, LoadROM] together to recover from a bad halt).
 
 void Chip8::enqueue(CoreEvent ev) {
+    if (event_tap_) event_tap_(ev);
     events_.push_back(std::move(ev));
 }
 

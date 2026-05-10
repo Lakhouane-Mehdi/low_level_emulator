@@ -114,6 +114,22 @@ def main() -> int:
             print(line)
         print("]")
 
+    # Replay regression: every .json under replays/ must round-trip with
+    # exit 0 (= all checkpoints pass). One drift = entire CI run fails.
+    replays_dir = ROOT / "replays"
+    if replays_dir.exists():
+        print()
+        for path in sorted(replays_dir.glob("*.json")):
+            cmd = [str(runner), "--replay", str(path)]
+            res = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+            label = path.name
+            if res.returncode == 0:
+                print(f"ok    replay {label}")
+            else:
+                print(f"FAIL  replay {label}  rc={res.returncode}")
+                print((res.stderr or "").rstrip())
+                fails += 1
+
     if fails:
         print(f"\n{fails} FAILURE(S)")
         return 1

@@ -196,6 +196,26 @@ python tools/test_headless.py             # verify
 python tools/test_headless.py --update    # regenerate golden hashes
 ```
 
+## Replay system
+
+Hermetic JSON replay files capture ROM bytes, ISA, quirks, seed, and the
+full event stream needed to reproduce a session deterministically.
+
+```
+build/Release/chip8.exe roms/BREAKOUT.ch8                # play
+# Shift+R toggles recording; on second press it writes replays/<rom>-<ts>.json
+
+build/Release/chip8_run.exe --replay replays/breakout_demo.json --print-hash
+# Replay-mode runs the recorded events at their scheduled frame ordinals.
+# Embedded checkpoints are verified — any drift exits 1.
+```
+
+A replay is the source of truth: tampering with ROM bytes, seed, ISA, or
+quirks produces a checkpoint mismatch. Sharing a replay lets a reviewer
+reproduce your session byte-identically without your machine's PRNG seed.
+
+Format: `chip8-replay` v1, see `src/core/Replay.hpp` for the schema.
+
 ## Project layout
 
 ```

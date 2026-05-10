@@ -18,6 +18,7 @@ add_executable(chip8
     src/core/Chip8.cpp
     src/core/Memory.cpp
     src/core/Disassembler.cpp
+    src/core/Replay.cpp
     src/core/isa/IInstructionSet.cpp
     src/core/isa/Chip8ISA.cpp
     src/core/isa/SchipISA.cpp
@@ -59,6 +60,7 @@ set(CHIP8_CORE_SOURCES
     src/core/Chip8.cpp
     src/core/Memory.cpp
     src/core/Disassembler.cpp
+    src/core/Replay.cpp
     src/core/isa/IInstructionSet.cpp
     src/core/isa/Chip8ISA.cpp
     src/core/isa/SchipISA.cpp

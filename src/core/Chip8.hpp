@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -206,6 +207,13 @@ public:
     size_t pendingEvents() const { return events_.size(); }
     uint64_t totalEventsApplied() const { return total_events_applied_; }
 
+    // Optional tap fired BEFORE each event lands on the queue. Used by the
+    // App's replay recorder to capture events at the moment they're
+    // submitted, so live keypad / debugger / scripted events are all
+    // recorded uniformly. Pass nullptr to disable.
+    using EventTap = std::function<void(const CoreEvent&)>;
+    void   setEventTap(EventTap tap) { event_tap_ = std::move(tap); }
+
     // ---- machine API the ISA programs against ----
     // These are the only "non-trivial" mutators. Trivial ops (PC+=2, V[x]=nn,
     // index=nnn, etc.) the ISA does directly via the public state fields.
@@ -246,4 +254,5 @@ private:
 
     std::deque<CoreEvent>  events_;
     uint64_t               total_events_applied_ = 0;   // diagnostic counter
+    EventTap               event_tap_;
 };

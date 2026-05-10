@@ -8,6 +8,7 @@
 #include "../src/core/Chip8.hpp"
 #include "../src/core/CoreEvents.hpp"
 #include "../src/core/Memory.hpp"
+#include "../src/core/Replay.hpp"
 #include "../src/core/isa/IInstructionSet.hpp"
 
 #include <cstdint>
@@ -486,6 +487,147 @@ static void test_framebuffer_hash_seeded_program() {
     CHECK(a != blank.framebufferHash());
 }
 
+// -------- Replay round-trip via JSON --------
+static void test_replay_roundtrip() {
+    std::printf("\n[test_replay_roundtrip]\n");
+    Replay r;
+    r.rom_bytes = {0x00, 0xE0, 0x12, 0x00};   // CLS; JP 200
+    r.isa       = "schip";
+    r.quirks    = Chip8::legacyQuirks();
+    r.have_seed = true;
+    r.seed      = 0xCAFE;
+    r.events.push_back({10, InjectKeyEvent{0x5, true}});
+    r.events.push_back({20, InjectKeyEvent{0x5, false}});
+    r.events.push_back({25, WriteMemoryEvent{0x300, 0xAB}});
+    r.events.push_back({30, WriteMemoryBlockEvent{0x400, {0xDE, 0xAD, 0xBE, 0xEF}}});
+    r.events.push_back({40, SetPCEvent{0x250}});
+    r.events.push_back({50, ResetEvent{}});
+    r.events.push_back({60, SetSeedEvent{0xBEEF}});
+    r.checkpoints.push_back({60,  0xDEADBEEF12345678ULL});
+    r.checkpoints.push_back({120, 0x1122334455667788ULL});
+
+    auto json = r.toJson();
+
+    Replay r2;
+    std::string err;
+    bool ok = r2.fromJson(json, &err);
+    if (!ok) std::printf("parse err: %s\n", err.c_str());
+    CHECK(ok);
+
+    CHECK_EQ((int)r2.version, Replay::VERSION);
+    CHECK_EQ((int)r2.rom_bytes.size(), 4);
+    CHECK_EQ((int)r2.rom_bytes[0], 0x00);
+    CHECK_EQ((int)r2.rom_bytes[3], 0x00);
+    CHECK(r2.isa == "schip");
+    CHECK(r2.quirks.shift_in_place    == false);
+    CHECK(r2.quirks.load_store_no_inc == false);
+    CHECK(r2.quirks.display_wait      == true);
+    CHECK(r2.have_seed);
+    CHECK_EQ((int)r2.seed, 0xCAFE);
+    CHECK_EQ((int)r2.events.size(), 7);
+    CHECK_EQ((int)r2.checkpoints.size(), 2);
+    CHECK_EQ((long long)r2.checkpoints[0].hash, (long long)0xDEADBEEF12345678ULL);
+
+    // Pick out the first event and verify type + payload.
+    const auto& first = r2.events[0];
+    CHECK_EQ((int)first.frame, 10);
+    CHECK(std::holds_alternative<InjectKeyEvent>(first.event));
+    auto& ik = std::get<InjectKeyEvent>(first.event);
+    CHECK_EQ((int)ik.key, 5);
+    CHECK(ik.down);
+}
+
+// -------- Replay deterministic playback: events at frame N produce same hash --------
+static void test_replay_deterministic_playback() {
+    std::printf("\n[test_replay_deterministic_playback]\n");
+    // Build a tiny program that just halts at PC 0x202 forever, but we'll
+    // inject a key at frame 5 and write memory at frame 10 to verify the
+    // replay applies events at the right frames.
+    auto build_cpu = [](const Replay& r) {
+        Chip8 cpu;
+        cpu.installISA(&ISA::by_name(r.isa));
+        cpu.quirks = r.quirks;
+        cpu.loadROMBytes(r.rom_bytes);
+        if (r.have_seed) cpu.setSeed(static_cast<uint64_t>(r.seed));
+        return cpu;
+    };
+    auto run_replay = [&](const Replay& r, int total_frames) {
+        Chip8 cpu = build_cpu(r);
+        size_t ev_idx = 0;
+        for (int f = 0; f < total_frames; ++f) {
+            // Apply all events scheduled for this frame ordinal BEFORE
+            // the cycle batch (matches GUI App drain semantics).
+            while (ev_idx < r.events.size() && r.events[ev_idx].frame == (uint64_t)f) {
+                cpu.enqueue(r.events[ev_idx].event);
+                ++ev_idx;
+            }
+            cpu.drainEvents();
+            for (int c = 0; c < 12; ++c) cpu.cycle();
+            cpu.tickTimers();
+        }
+        return std::pair<uint64_t, uint8_t>{cpu.framebufferHash(), cpu.keys[5]};
+    };
+
+    Replay r;
+    r.rom_bytes = {0x12, 0x00};            // JP 0x200 (infinite loop)
+    r.isa       = "mx8";
+    r.quirks    = Chip8::modernQuirks();
+    r.have_seed = true;
+    r.seed      = 1;
+    r.events.push_back({5,  InjectKeyEvent{0x5, true}});
+    r.events.push_back({10, WriteMemoryEvent{0x300, 0x42}});
+
+    auto [h1, k1] = run_replay(r, 30);
+    auto [h2, k2] = run_replay(r, 30);
+    CHECK_EQ((long long)h1, (long long)h2);
+    CHECK_EQ((int)k1, 1);
+    CHECK_EQ((int)k2, 1);
+
+    // Same replay run twice -> identical state (already proven above).
+    // Now verify replay is sensitive to seed: a SetSeedEvent at frame 0
+    // followed by RND at frame 1 produces different output for different
+    // seeds.
+    Replay r2 = r;
+    // Replace ROM with: RND V0,FF; JP 0x202 (infinite loop, halts on seed)
+    r2.rom_bytes = {0xC0, 0xFF, 0x12, 0x02};
+    r2.have_seed = true;
+    r2.seed = 1;
+    auto [hA, kA] = run_replay(r2, 5);
+    (void)kA;
+
+    Replay r3 = r2;
+    r3.seed = 999;
+    auto [hC, kC] = run_replay(r3, 5);
+    (void)kC;
+    // Different seed => RND produces different bytes, so V0 differs.
+    // Hash is a framebuffer hash though — V0 doesn't show up in pixels.
+    // Skip this assertion: the replay IS deterministic regardless of seed
+    // because the program doesn't draw anything. Instead verify the seed
+    // actually got applied by checking a rendered run differs:
+    Replay r4 = r2;
+    // Program that draws a pixel at (RND, RND): different seeds produce
+    // different positions, hence different framebuffer hashes.
+    r4.rom_bytes = {
+        0xC0, 0x3F,   // RND V0, 3F   (V0 in 0..63, lo-res X)
+        0xC1, 0x1F,   // RND V1, 1F   (V1 in 0..31, lo-res Y)
+        0xA2, 0x10,   // LD I, 0x210
+        0xD0, 0x11,   // DRW V0, V1, 1
+        0x12, 0x08,   // JP 0x208 (halt loop)
+        // 0x20A..0x20F: padding
+        0,0,0,0,0,0,
+        // 0x210: 1-byte sprite (a single pixel pattern)
+        0x80
+    };
+    r4.seed = 1;
+    auto [h_seed1, _] = run_replay(r4, 5);
+    Replay r5 = r4;
+    r5.seed = 999;
+    auto [h_seed999, __] = run_replay(r5, 5);
+    (void)_; (void)__;
+    // Different seeds -> different (x, y) -> different framebuffer hash.
+    CHECK(h_seed1 != h_seed999);
+}
+
 // -------- 12. CXNN with NN mask --------
 static void test_rnd_mask() {
     std::printf("\n[test_rnd_mask]\n");
@@ -527,6 +669,8 @@ int main() {
     test_events_excluded_from_snapshot();
     test_framebuffer_hash();
     test_framebuffer_hash_seeded_program();
+    test_replay_roundtrip();
+    test_replay_deterministic_playback();
     test_rnd_mask();
 
     if (g_failures > 0) {

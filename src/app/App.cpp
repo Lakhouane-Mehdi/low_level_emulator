@@ -5,9 +5,13 @@
 #include "../ui/RomBrowser.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <optional>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -52,6 +56,20 @@ bool App::selectROM() {
         if (romPath.empty()) return false;
     }
     if (!cpu_.loadROM(romPath.string())) return false;
+
+    // Cache the loaded bytes for replay recording — replays embed the
+    // full ROM image so they're hermetic.
+    {
+        std::ifstream rf(romPath.string(), std::ios::binary | std::ios::ate);
+        if (rf) {
+            auto sz = rf.tellg();
+            rf.seekg(0, std::ios::beg);
+            recording_rom_bytes_.resize(static_cast<size_t>(sz));
+            rf.read(reinterpret_cast<char*>(recording_rom_bytes_.data()), sz);
+            recording_label_ = romPath.stem().string();
+        }
+    }
+
     cpu_.quirks = cfg_.legacy_quirks ? Chip8::legacyQuirks() : Chip8::modernQuirks();
     cpu_.quirks.mx8_extensions = cfg_.mx8_extensions;
     // Apply deterministic seed AFTER load so reset() inside loadROM doesn't
@@ -80,6 +98,61 @@ void App::onLoadState() { if (saved_state_) cpu_.restore(*saved_state_); }
 void App::onAdjustSpeed(int delta) {
     cfg_.cycles_per_frame = std::max(cfg_.cycles_min,
                                      std::min(cfg_.cycles_max, cfg_.cycles_per_frame + delta));
+}
+
+void App::startRecording(const std::vector<uint8_t>& rom_bytes,
+                         const std::string&          isa_name,
+                         const std::string&          rom_label) {
+    recording_replay_ = Replay{};
+    recording_replay_.rom_bytes  = rom_bytes;
+    recording_replay_.isa        = isa_name;
+    recording_replay_.quirks     = cpu_.quirks;
+    recording_replay_.have_seed  = (cfg_.rng_seed >= 0);
+    recording_replay_.seed       = cfg_.rng_seed >= 0 ? cfg_.rng_seed : 0;
+    recording_replay_.events.clear();
+    recording_replay_.checkpoints.clear();
+    recording_label_ = rom_label;
+    frame_ordinal_   = 0;
+    recording_       = true;
+}
+
+std::string App::stopRecordingAndSave() {
+    if (!recording_) return "";
+    // Drop a final checkpoint at the current frame for self-validation.
+    recording_replay_.checkpoints.push_back(
+        {frame_ordinal_, cpu_.framebufferHash()});
+
+    fs::path dir = "replays";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+
+    // Filename: <rom_label>-<unix_seconds>.json
+    auto now = std::chrono::system_clock::now().time_since_epoch();
+    auto secs = std::chrono::duration_cast<std::chrono::seconds>(now).count();
+    std::ostringstream name;
+    name << (recording_label_.empty() ? "replay" : recording_label_)
+         << "-" << secs << ".json";
+    fs::path path = dir / name.str();
+
+    bool ok = recording_replay_.save(path.string());
+    recording_ = false;
+    return ok ? path.string() : "";
+}
+
+void App::recordEventIfActive(const CoreEvent& ev) {
+    if (!recording_) return;
+    // Only record events that matter for replay (exclude debugger ones).
+    bool keep = std::visit([](auto&& e) {
+        using T = std::decay_t<decltype(e)>;
+        return std::is_same_v<T, InjectKeyEvent>
+            || std::is_same_v<T, WriteMemoryEvent>
+            || std::is_same_v<T, WriteMemoryBlockEvent>
+            || std::is_same_v<T, SetPCEvent>
+            || std::is_same_v<T, ResetEvent>
+            || std::is_same_v<T, SetSeedEvent>;
+    }, ev);
+    if (!keep) return;
+    recording_replay_.events.push_back({frame_ordinal_, ev});
 }
 
 bool App::reachedStepStop() {
@@ -136,6 +209,10 @@ void App::runFrameOfCpu(DebugView& dbg) {
         }
     }
     cpu_.tickTimers();
+    // Frame ordinal advances after the cycle batch, so events submitted
+    // during the next frame get the next ordinal — matches the replay
+    // format's frame indexing semantics.
+    ++frame_ordinal_;
 }
 
 void App::mainLoop() {
@@ -192,6 +269,26 @@ void App::mainLoop() {
                         dbg.setStatusMessage("All breakpoints cleared");
                     } else {
                         dbg.toggleBreakpointAtPC(cpu_);
+                    }
+                    break;
+                case K::R:
+                    // Shift+R toggles replay recording. Plain R is keypad
+                    // key D so we only act on the shifted variant.
+                    if (kp->shift) {
+                        if (!recording_) {
+                            cpu_.setEventTap(
+                                [this](const CoreEvent& ev){ recordEventIfActive(ev); });
+                            startRecording(recording_rom_bytes_, cfg_.isa_name, recording_label_);
+                            dbg.setStatusMessage("REC: started — Shift+R again to save");
+                        } else {
+                            cpu_.setEventTap(nullptr);
+                            std::string p = stopRecordingAndSave();
+                            std::string msg = p.empty() ? "REC: save FAILED"
+                                                        : ("REC: saved " + p);
+                            dbg.setStatusMessage(msg, 240);
+                        }
+                    } else {
+                        consumed = false;   // fall through to keypad
                     }
                     break;
                 case K::W:
