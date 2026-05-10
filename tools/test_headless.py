@@ -130,6 +130,18 @@ def main() -> int:
                 print((res.stderr or "").rstrip())
                 fails += 1
 
+    # Diff-replay integration test (5 cases: self-diff, seed tamper,
+    # event tamper, input-divergence refusal, self-check).
+    print()
+    diff_test = ROOT / "tools" / "test_diff_replay.py"
+    if diff_test.exists():
+        res = subprocess.run([sys.executable, str(diff_test)],
+                             cwd=ROOT, capture_output=True, text=True)
+        for line in (res.stdout or "").splitlines():
+            print(f"  {line}")
+        if res.returncode != 0:
+            fails += 1
+
     if fails:
         print(f"\n{fails} FAILURE(S)")
         return 1

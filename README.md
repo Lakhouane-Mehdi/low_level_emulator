@@ -234,6 +234,35 @@ reproduce your session byte-identically without your machine's PRNG seed.
 
 Format: `chip8-replay` v1, see `src/core/Replay.hpp` for the schema.
 
+## Desync diagnostics (--diff-replay)
+
+When two replays *should* produce the same outcome but don't,
+`chip8_run --diff-replay A.json B.json` binary-searches the first frame
+at which their machine state diverges. Output reports per-component
+deltas (registers vs memory vs RNG vs framebuffer vs stack) so you can
+localize *what* drifted, not just *where*.
+
+```
+build/Release/chip8_run.exe --diff-replay a.json b.json
+# input streams: 2 events, identical
+# searching divergence in frames [0, 600) ...
+#   divergence at frame 142:
+#     memory       differs: 0xBD4E9B37638590EE  vs  0x3C26171756D63C45
+```
+
+The tool first compares input event streams. If those differ, it
+refuses to proceed (use `--force` to diff anyway) — same inputs are a
+prerequisite for a meaningful execution diff.
+
+`chip8_run --replay file.json --self-check` re-runs a replay against
+its own embedded checkpoints. Detects implementation drift: if the same
+replay file produces a different framebuffer hash on a new build,
+something changed in the emulator core.
+
+The full machine-state fingerprint (`MachineStateDigest`) covers
+framebuffer + memory + V0..VF + stack + RNG state + scalar fields
+(PC/I/SP/timers/hires/halt). See [src/core/Chip8.hpp](src/core/Chip8.hpp).
+
 ## Project layout
 
 ```
