@@ -3,13 +3,13 @@
 #include "Config.hpp"
 #include "../core/Chip8.hpp"
 #include "../core/Replay.hpp"
+#include "../core/RewindBuffer.hpp"
 #include "../ui/Renderer.hpp"
 #include "../ui/Input.hpp"
 #include "../ui/AudioBeep.hpp"
 #include "../ui/DebugView.hpp"
 
 #include <SFML/Graphics.hpp>
-#include <deque>
 #include <optional>
 
 class App {
@@ -35,7 +35,9 @@ private:
     std::optional<int>         step_out_baseline_sp_;
 
     std::optional<Chip8::Snapshot> saved_state_;
-    std::deque<Chip8::Snapshot>    rewind_buf_;
+    // Hybrid rewind: anchors at fixed intervals + recorded events between
+    // them. Memory usage scales with seconds-of-window not frames-of-window.
+    RewindBuffer                   rewind_buf_;
 
     // Replay recording state. When recording_ is true the App snapshots
     // every event the CPU is about to drain (with the current frame
@@ -53,6 +55,9 @@ private:
     void mainLoop();
     void runFrameOfCpu(DebugView& dbg);
     bool drainWatchpoint(DebugView& dbg);   // returns true if a watch fired
+    // Reconstruct CPU state at `target_frame` using the rewind buffer.
+    // Returns true if a rewind happened. Caller updates frame_ordinal_.
+    bool rewindToFrame(uint64_t target_frame);
 
     // Replay recording API. startRecording captures ROM/ISA/quirks/seed
     // at the moment of capture; stopRecordingAndSave writes JSON.

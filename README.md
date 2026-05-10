@@ -196,6 +196,24 @@ python tools/test_headless.py             # verify
 python tools/test_headless.py --update    # regenerate golden hashes
 ```
 
+## Rewind (hybrid model)
+
+Hold `Backspace` to rewind one frame at a time. The rewind buffer doesn't
+store one snapshot per frame — it stores **anchors** (full snapshots) at a
+fixed cadence (one per second by default) plus the recorded **event log**
+between them. To rewind to frame N, the App restores the latest anchor
+≤ N and re-executes intervening frames deterministically, replaying any
+events that were originally submitted on each of those frames.
+
+Memory cost is constant per second of window, not per frame. The default
+rewind window is 30 seconds (~180KB) and can be raised to minutes
+without architectural cost via `--rewind-sec N`.
+
+This works because every state mutation already flows through the event
+queue (live keypad included), and the snapshot format already captures
+RNG + memory + keypad state — see `src/core/RewindBuffer.hpp` for the
+exact reconstruction contract.
+
 ## Replay system
 
 Hermetic JSON replay files capture ROM bytes, ISA, quirks, seed, and the

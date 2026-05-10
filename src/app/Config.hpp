@@ -10,7 +10,7 @@ struct Config {
     int  cycles_per_frame = 12;     // ~720Hz at 60fps. Range [1..2000].
     int  cycles_min       = 1;
     int  cycles_max       = 2000;
-    int  rewind_seconds   = 5;
+    int  rewind_seconds   = 30;   // hybrid model makes 30s near-free
     bool start_paused     = false;
     bool legacy_quirks    = false;  // start in COSMAC-VIP mode
     bool mx8_extensions   = false;  // start with MX-8 custom opcodes enabled

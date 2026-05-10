@@ -18,7 +18,7 @@ static void printUsage(const char* prog) {
         "                   opcodes via the runtime quirk).\n"
         "  --paused         Start paused.\n"
         "  --roms-dir DIR   Directory to scan for the ROM picker (default: roms).\n"
-        "  --rewind-sec N   Seconds of rewind history (default: 5).\n"
+        "  --rewind-sec N   Seconds of rewind history (default: 30).\n"
         "  --palette NAME   mono | amber | green | gameboy | c64 | ice | hotdog\n"
         "  -h, --help       This help.\n"
         "Hotkeys:\n"

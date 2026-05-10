@@ -9,6 +9,7 @@
 #include "../src/core/CoreEvents.hpp"
 #include "../src/core/Memory.hpp"
 #include "../src/core/Replay.hpp"
+#include "../src/core/RewindBuffer.hpp"
 #include "../src/core/isa/IInstructionSet.hpp"
 
 #include <cstdint>
@@ -628,6 +629,200 @@ static void test_replay_deterministic_playback() {
     CHECK(h_seed1 != h_seed999);
 }
 
+// -------- RewindBuffer. Anchors take at interval boundaries --------
+static void test_rewind_anchors_at_intervals() {
+    std::printf("\n[test_rewind_anchors_at_intervals]\n");
+    Chip8 cpu;
+    RewindBuffer rb(/*anchor_interval=*/10, /*max_window=*/100);
+
+    // Drive 25 frames. Should anchor at 0 (first frame always), 10, 20.
+    for (uint64_t f = 0; f < 25; ++f) {
+        rb.noteFrameBegin(f, cpu);
+        rb.noteFrameEnd(f);
+    }
+    auto frames = rb.anchorFrames();
+    CHECK_EQ((int)frames.size(), 3);
+    CHECK_EQ((int)frames[0], 0);
+    CHECK_EQ((int)frames[1], 10);
+    CHECK_EQ((int)frames[2], 20);
+}
+
+// -------- RewindBuffer. trim() drops old anchors but keeps the latest --------
+static void test_rewind_trim_keeps_latest() {
+    std::printf("\n[test_rewind_trim_keeps_latest]\n");
+    Chip8 cpu;
+    RewindBuffer rb(/*anchor_interval=*/10, /*max_window=*/30);
+    for (uint64_t f = 0; f < 100; ++f) {
+        rb.noteFrameBegin(f, cpu);
+        rb.noteFrameEnd(f);
+        rb.trim(f);
+    }
+    // At frame 99 with max_window=30, anything before frame 69 should be dropped.
+    auto frames = rb.anchorFrames();
+    CHECK(frames.size() >= 1);
+    CHECK(frames.front() >= 60);    // 60 or later — the floor of (99-30)/10
+}
+
+// -------- RewindBuffer. Reconstruction matches a fresh run, byte-for-byte --------
+static void test_rewind_reconstruction_matches_fresh() {
+    std::printf("\n[test_rewind_reconstruction_matches_fresh]\n");
+    auto setup_cpu = []() {
+        Chip8 c;
+        c.installISA(&ISA::mx8());
+        c.setSeed(0xCAFEBABE);
+        // Tiny program: RND V0, FF; RND V1, FF; JP 0x200 (loop)
+        std::vector<uint16_t> ops = {0xC0FF, 0xC1FF, 0x1200};
+        std::vector<uint8_t> bytes;
+        for (uint16_t w : ops) { bytes.push_back(w >> 8); bytes.push_back(w & 0xFF); }
+        c.loadROMBytes(bytes);
+        c.setSeed(0xCAFEBABE);   // re-seed after loadROM (loadROM calls reset)
+        return c;
+    };
+
+    constexpr int CYCLES_PER_FRAME = 5;
+    constexpr int ANCHOR_INTERVAL  = 7;       // intentionally non-multiple
+    constexpr int TOTAL_FRAMES     = 50;
+    constexpr uint64_t TARGET      = 23;
+
+    // ---- Run A: fresh CPU, drive to frame TARGET, capture state hash ----
+    Chip8 fresh = setup_cpu();
+    uint64_t fresh_frame_ord = 0;
+    for (; fresh_frame_ord < TARGET; ++fresh_frame_ord) {
+        fresh.drainEvents();
+        for (int c = 0; c < CYCLES_PER_FRAME; ++c) fresh.cycle();
+        fresh.tickTimers();
+    }
+    uint64_t fresh_hash = fresh.framebufferHash();
+    uint16_t fresh_pc   = fresh.pc;
+    uint8_t  fresh_v0   = fresh.v[0];
+    uint8_t  fresh_v1   = fresh.v[1];
+
+    // ---- Run B: simulate App driving CPU + RewindBuffer; rewind to TARGET ----
+    Chip8 b = setup_cpu();
+    RewindBuffer rb(ANCHOR_INTERVAL, /*max_window=*/TOTAL_FRAMES + 10);
+    b.setEventTap([&](const CoreEvent& ev){
+        // Stamping: buffer captures the frame at submission time. Our test
+        // emits no events, but wire it up for completeness.
+        rb.noteEvent(/*frame=*/0, ev);
+    });
+
+    for (uint64_t f = 0; f < TOTAL_FRAMES; ++f) {
+        rb.noteFrameBegin(f, b);
+        b.drainEvents();
+        for (int c = 0; c < CYCLES_PER_FRAME; ++c) b.cycle();
+        b.tickTimers();
+        rb.noteFrameEnd(f);
+    }
+
+    // Now rewind to TARGET.
+    auto plan = rb.planRewindTo(TARGET);
+    CHECK(plan.has_value());
+    if (!plan) return;
+
+    b.restore(plan->anchor);
+    for (int f = 0; f < plan->frames_to_advance; ++f) {
+        for (auto& ev : plan->events_per_frame[f]) b.enqueue(ev);
+        b.drainEvents();
+        for (int c = 0; c < CYCLES_PER_FRAME; ++c) b.cycle();
+        b.tickTimers();
+    }
+
+    // State at frame TARGET should match the fresh run exactly.
+    CHECK_EQ((long long)b.framebufferHash(), (long long)fresh_hash);
+    CHECK_EQ((int)b.pc,    (int)fresh_pc);
+    CHECK_EQ((int)b.v[0],  (int)fresh_v0);
+    CHECK_EQ((int)b.v[1],  (int)fresh_v1);
+}
+
+// -------- RewindBuffer. Reconstruction with events: replay reproduces input timeline --------
+static void test_rewind_with_events() {
+    std::printf("\n[test_rewind_with_events]\n");
+    auto setup_cpu = []() {
+        Chip8 c;
+        c.installISA(&ISA::mx8());
+        // Program: SKP V0 ; JP 0x202 (no skip) ; LD V5, 0xAA ; JP self
+        // Layout: 200:E09E  202:1202  204:65AA  206:1206
+        std::vector<uint16_t> ops = {0xE09E, 0x1202, 0x65AA, 0x1206};
+        std::vector<uint8_t> bytes;
+        for (uint16_t w : ops) { bytes.push_back(w >> 8); bytes.push_back(w & 0xFF); }
+        c.loadROMBytes(bytes);
+        c.v[0] = 5;     // skip-if-key-5-pressed
+        return c;
+    };
+
+    constexpr int CYCLES_PER_FRAME = 1;     // one op per frame for clarity
+    constexpr int ANCHOR_INTERVAL  = 4;
+    constexpr int TOTAL_FRAMES     = 12;
+
+    // Reference run: press key 5 at frame 2.
+    Chip8 ref = setup_cpu();
+    uint8_t ref_v5_at_target = 0;
+    for (uint64_t f = 0; f < TOTAL_FRAMES; ++f) {
+        if (f == 2) ref.enqueue(InjectKeyEvent{5, true});
+        ref.drainEvents();
+        for (int c = 0; c < CYCLES_PER_FRAME; ++c) ref.cycle();
+        ref.tickTimers();
+        if (f == 6) ref_v5_at_target = ref.v[5];   // capture for comparison
+    }
+    // Expected: key 5 was pressed by frame 2; SKP V0 (V0=5) at frame 0
+    // misses (key not yet pressed), JP back, then... the program loops at
+    // 0x200/0x202 forever because it never advances. Let me just trust
+    // the reference run here and assert reconstruction matches it.
+
+    // Recording run: same input sequence + RewindBuffer.
+    Chip8 b = setup_cpu();
+    RewindBuffer rb(ANCHOR_INTERVAL, /*max_window=*/TOTAL_FRAMES + 10);
+    uint64_t cur_frame = 0;
+    b.setEventTap([&](const CoreEvent& ev){
+        rb.noteEvent(cur_frame, ev);
+    });
+
+    for (cur_frame = 0; cur_frame < TOTAL_FRAMES; ++cur_frame) {
+        rb.noteFrameBegin(cur_frame, b);
+        if (cur_frame == 2) b.enqueue(InjectKeyEvent{5, true});
+        b.drainEvents();
+        for (int c = 0; c < CYCLES_PER_FRAME; ++c) b.cycle();
+        b.tickTimers();
+        rb.noteFrameEnd(cur_frame);
+    }
+
+    // Rewind to frame 7 — past the key press, anchor likely at frame 4.
+    auto plan = rb.planRewindTo(7);
+    CHECK(plan.has_value());
+    if (!plan) return;
+
+    b.restore(plan->anchor);
+    for (int f = 0; f < plan->frames_to_advance; ++f) {
+        for (auto& ev : plan->events_per_frame[f]) b.enqueue(ev);
+        b.drainEvents();
+        for (int c = 0; c < CYCLES_PER_FRAME; ++c) b.cycle();
+        b.tickTimers();
+    }
+
+    // Re-run the reference fresh up to frame 7 too for direct comparison.
+    Chip8 ref2 = setup_cpu();
+    for (uint64_t f = 0; f <= 7; ++f) {
+        if (f == 2) ref2.enqueue(InjectKeyEvent{5, true});
+        ref2.drainEvents();
+        for (int c = 0; c < CYCLES_PER_FRAME; ++c) ref2.cycle();
+        ref2.tickTimers();
+    }
+
+    CHECK_EQ((int)b.pc,        (int)ref2.pc);
+    CHECK_EQ((int)b.v[5],      (int)ref2.v[5]);
+    CHECK_EQ((int)b.keys[5],   (int)ref2.keys[5]);
+    (void)ref_v5_at_target;
+}
+
+// -------- RewindBuffer. Plan returns nullopt when empty --------
+static void test_rewind_empty() {
+    std::printf("\n[test_rewind_empty]\n");
+    RewindBuffer rb(60, 1800);
+    CHECK(!rb.planRewindTo(0).has_value());
+    CHECK(!rb.planRewindOneFrame(100).has_value());
+    CHECK_EQ((int)rb.anchorCount(), 0);
+}
+
 // -------- 12. CXNN with NN mask --------
 static void test_rnd_mask() {
     std::printf("\n[test_rnd_mask]\n");
@@ -671,6 +866,11 @@ int main() {
     test_framebuffer_hash_seeded_program();
     test_replay_roundtrip();
     test_replay_deterministic_playback();
+    test_rewind_anchors_at_intervals();
+    test_rewind_trim_keeps_latest();
+    test_rewind_reconstruction_matches_fresh();
+    test_rewind_with_events();
+    test_rewind_empty();
     test_rnd_mask();
 
     if (g_failures > 0) {

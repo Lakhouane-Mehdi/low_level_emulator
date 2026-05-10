@@ -17,10 +17,21 @@ namespace fs = std::filesystem;
 
 App::App(Config cfg)
     : cfg_(std::move(cfg)),
-      window_() {
+      window_(),
+      // Anchor every 60 frames (1s at 60fps), keep the configured window.
+      rewind_buf_(60, cfg_.rewind_seconds * 60) {
     cpu_.quirks = cfg_.legacy_quirks ? Chip8::legacyQuirks() : Chip8::modernQuirks();
     cpu_.quirks.mx8_extensions = cfg_.mx8_extensions;
     cpu_.installISA(&ISA::by_name(cfg_.isa_name));
+
+    // The rewind buffer needs to see every CoreEvent for replay correctness.
+    // It composes with the (separate) replay-recorder tap by chaining
+    // through one App-side dispatcher, so both observers fire on each event.
+    cpu_.setEventTap([this](const CoreEvent& ev) {
+        rewind_buf_.noteEvent(frame_ordinal_, ev);
+        recordEventIfActive(ev);   // no-op unless Shift+R recording is active
+    });
+
     paused_ = cfg_.start_paused;
 }
 
@@ -87,9 +98,33 @@ int App::run() {
 }
 
 void App::pushRewindFrame() {
-    rewind_buf_.push_back(cpu_.snapshot());
-    const size_t cap = static_cast<size_t>(cfg_.rewind_seconds * 60);
-    if (rewind_buf_.size() > cap) rewind_buf_.pop_front();
+    // Hybrid model: RewindBuffer decides whether this frame becomes an
+    // anchor (every N frames) or just trims the slabs.
+    rewind_buf_.noteFrameBegin(frame_ordinal_, cpu_);
+    rewind_buf_.trim(frame_ordinal_);
+}
+
+bool App::rewindToFrame(uint64_t target_frame) {
+    auto plan = rewind_buf_.planRewindTo(target_frame);
+    if (!plan) return false;
+
+    cpu_.restore(plan->anchor);
+    // Re-execute frames [anchor_frame, target_frame) deterministically.
+    // For each frame, re-enqueue any events stamped on that frame, then
+    // drain + cycle batch + tick — the same shape as the live frame loop.
+    for (int f = 0; f < plan->frames_to_advance; ++f) {
+        for (const auto& ev : plan->events_per_frame[f]) {
+            cpu_.enqueue(ev);
+        }
+        cpu_.drainEvents();
+        for (int c = 0; c < cfg_.cycles_per_frame; ++c) {
+            cpu_.cycle();
+            if (cpu_.halted()) break;
+        }
+        cpu_.tickTimers();
+    }
+    frame_ordinal_ = plan->target_frame;
+    return true;
 }
 
 void App::onSaveState() { saved_state_ = cpu_.snapshot(); }
@@ -273,15 +308,15 @@ void App::mainLoop() {
                     break;
                 case K::R:
                     // Shift+R toggles replay recording. Plain R is keypad
-                    // key D so we only act on the shifted variant.
+                    // key D so we only act on the shifted variant. The
+                    // event tap is permanent (installed for rewind); the
+                    // recorder just flips a flag — recordEventIfActive
+                    // is a no-op until startRecording is called.
                     if (kp->shift) {
                         if (!recording_) {
-                            cpu_.setEventTap(
-                                [this](const CoreEvent& ev){ recordEventIfActive(ev); });
                             startRecording(recording_rom_bytes_, cfg_.isa_name, recording_label_);
                             dbg.setStatusMessage("REC: started — Shift+R again to save");
                         } else {
-                            cpu_.setEventTap(nullptr);
                             std::string p = stopRecordingAndSave();
                             std::string msg = p.empty() ? "REC: save FAILED"
                                                         : ("REC: saved " + p);
@@ -364,16 +399,14 @@ void App::mainLoop() {
         }
 
         // ---- rewind / advance ----
-        // Every branch must drain pending events at a known boundary
-        // (typically before any cycle/restore) so debugger enqueues take
-        // effect even when paused or stepping. Rewind drains BEFORE the
-        // restore so any mid-rewind enqueue (rare) is honored against the
-        // current state, not the restored one.
+        // Rewind: hybrid reconstruction via the latest anchor + replay of
+        // recorded events. Each Backspace tick walks one frame back. The
+        // RewindBuffer's anchor cadence (every 60 frames) means worst-case
+        // reconstruction replays ~60 frames of cycles — well under 1ms.
         rewinding_ = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Backspace);
         if (rewinding_ && !rewind_buf_.empty()) {
-            cpu_.drainEvents();
-            cpu_.restore(rewind_buf_.back());
-            rewind_buf_.pop_back();
+            cpu_.drainEvents();   // honor any pending UI mutations first
+            if (frame_ordinal_ > 0) rewindToFrame(frame_ordinal_ - 1);
         } else if (step_once_) {
             cpu_.drainEvents();
             pushRewindFrame();
@@ -390,7 +423,13 @@ void App::mainLoop() {
 
         window_.clear(sf::Color::Black);
         renderer.draw(window_);
-        dbg.draw(window_, cpu_, paused_, rewinding_, rewind_buf_.size(), cfg_.cycles_per_frame);
+        // Frames-of-rewind-available: distance from now to the oldest anchor.
+        size_t rewind_frames = 0;
+        const auto anchors = rewind_buf_.anchorFrames();
+        if (!anchors.empty() && frame_ordinal_ >= anchors.front()) {
+            rewind_frames = static_cast<size_t>(frame_ordinal_ - anchors.front());
+        }
+        dbg.draw(window_, cpu_, paused_, rewinding_, rewind_frames, cfg_.cycles_per_frame);
         window_.display();
     }
 }
