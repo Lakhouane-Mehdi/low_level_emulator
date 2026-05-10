@@ -1,5 +1,7 @@
 #include "Input.hpp"
 
+#include "../core/CoreEvents.hpp"
+
 int Input::mapKey(sf::Keyboard::Key k) {
     using K = sf::Keyboard::Key;
     switch (k) {
@@ -26,13 +28,15 @@ int Input::mapKey(sf::Keyboard::Key k) {
 bool Input::handleKeyPressed(const sf::Event::KeyPressed& kp, Chip8& cpu) {
     int k = mapKey(kp.code);
     if (k < 0) return false;
-    cpu.keys[k] = 1;
+    // All input mutation funnels through the event queue. Applies on the
+    // next drainEvents() (one-frame latency, deterministic, replayable).
+    cpu.enqueue(InjectKeyEvent{static_cast<uint8_t>(k), true});
     return true;
 }
 
 bool Input::handleKeyReleased(const sf::Event::KeyReleased& kr, Chip8& cpu) {
     int k = mapKey(kr.code);
     if (k < 0) return false;
-    cpu.keys[k] = 0;
+    cpu.enqueue(InjectKeyEvent{static_cast<uint8_t>(k), false});
     return true;
 }

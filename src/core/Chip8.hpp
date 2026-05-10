@@ -184,6 +184,13 @@ public:
     // ---- helpers exposed for the debugger ----
     uint16_t fetchOpcode(uint16_t addr) const;
 
+    // Canonical FNV-1a hash of the framebuffer bytes — renderer-independent,
+    // suitable for golden-image regression tests, replay self-check, CI
+    // assertions. Only the active region is hashed (lo-res = top-left
+    // 64x32, hi-res = full 128x64) so a hi-res ROM doesn't get a different
+    // hash just because the unused bottom half changes.
+    uint64_t framebufferHash() const;
+
     // ---- ISA management ----
     // CPU does not own the ISA pointer — singletons in IInstructionSet.hpp do.
     // installISA() is null-safe: passing nullptr keeps the previous ISA.

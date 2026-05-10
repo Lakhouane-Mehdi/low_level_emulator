@@ -243,6 +243,36 @@ uint16_t Chip8::fetchOpcode(uint16_t addr) const {
     return static_cast<uint16_t>((mem.peek(addr) << 8) | mem.peek(addr + 1));
 }
 
+uint64_t Chip8::framebufferHash() const {
+    // FNV-1a 64. Reduce each pixel to one bit (on/off) before hashing so
+    // the hash is renderer-palette-independent: changing color_on/off
+    // doesn't change the hash, only changing pixel content does.
+    constexpr uint64_t FNV_OFFSET = 0xCBF29CE484222325ULL;
+    constexpr uint64_t FNV_PRIME  = 0x100000001B3ULL;
+    uint64_t h = FNV_OFFSET;
+    const int w = hires ? DISPLAY_WIDTH  : LORES_WIDTH;
+    const int h_ = hires ? DISPLAY_HEIGHT : LORES_HEIGHT;
+    for (int y = 0; y < h_; ++y) {
+        // Pack 8 pixels per byte to keep the hash stable across pixel-format
+        // changes and to make hex dumps of the hash material readable.
+        for (int xb = 0; xb < w; xb += 8) {
+            uint8_t bits = 0;
+            for (int b = 0; b < 8 && xb + b < w; ++b) {
+                if (display[y * DISPLAY_WIDTH + xb + b] != 0) {
+                    bits |= static_cast<uint8_t>(1u << (7 - b));
+                }
+            }
+            h ^= bits;
+            h *= FNV_PRIME;
+        }
+    }
+    // Mix in mode bit so a blank lo-res screen and blank hi-res screen
+    // hash differently (they're semantically different states).
+    h ^= hires ? 1ULL : 0ULL;
+    h *= FNV_PRIME;
+    return h;
+}
+
 void Chip8::halt(HaltReason r) {
     halt_reason = r;
 }

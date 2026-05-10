@@ -421,6 +421,71 @@ static void test_events_excluded_from_snapshot() {
     CHECK_EQ((int)cpu.mem.peek(0x100), 0xFF);
 }
 
+// -------- Framebuffer hash. Stable, content-sensitive, mode-sensitive --------
+static void test_framebuffer_hash() {
+    std::printf("\n[test_framebuffer_hash]\n");
+    Chip8 cpu;
+
+    // Two fresh CPUs should hash to the same value (both blank lo-res).
+    Chip8 other;
+    CHECK_EQ((long long)cpu.framebufferHash(), (long long)other.framebufferHash());
+
+    // Hash is stable: calling twice on same state gives same value.
+    uint64_t h1 = cpu.framebufferHash();
+    uint64_t h2 = cpu.framebufferHash();
+    CHECK_EQ((long long)h1, (long long)h2);
+
+    // Mode-sensitive: blank lo-res vs blank hi-res must differ.
+    cpu.hires = true;
+    CHECK(cpu.framebufferHash() != h1);
+    cpu.hires = false;
+    CHECK_EQ((long long)cpu.framebufferHash(), (long long)h1);
+
+    // Content-sensitive: lighting one pixel changes the hash.
+    cpu.display[0] = 0xFFFFFFFF;
+    CHECK(cpu.framebufferHash() != h1);
+
+    // Palette-independent: lighting one pixel with a different "on" value
+    // (any nonzero) must hash the same (we only compare zero / non-zero).
+    Chip8 a, b;
+    a.display[5] = 0xFFFFFFFF;
+    b.display[5] = 0x00000001;     // also "on", different shade
+    CHECK_EQ((long long)a.framebufferHash(), (long long)b.framebufferHash());
+}
+
+// -------- Framebuffer hash. Determinism after seeded RND program --------
+// This is the canonical regression-suite shape: rom + seed -> exact hash.
+static void test_framebuffer_hash_seeded_program() {
+    std::printf("\n[test_framebuffer_hash_seeded_program]\n");
+    auto run = [](uint64_t seed) {
+        Chip8 cpu;
+        cpu.setSeed(seed);
+        // Tiny program: load font glyph for digit 5, draw at (V0=0, V1=0),
+        // then halt loop. Output is deterministic.
+        load(cpu, {
+            0x6000,         // LD V0, 0
+            0x6100,         // LD V1, 0
+            0x6205,         // LD V2, 5
+            0xF229,         // LD F, V2  (I = font for 5)
+            0xD015,         // DRW V0, V1, 5
+            0x1209          // JP 0x209  (halt loop)
+        });
+        for (int i = 0; i < 6; ++i) cpu.cycle();
+        return cpu.framebufferHash();
+    };
+    uint64_t a = run(1);
+    uint64_t b = run(1);
+    uint64_t c = run(999);
+    CHECK_EQ((long long)a, (long long)b);   // same seed -> same hash
+    // Same seed-AND-program means same output regardless of seed (no RND used).
+    // So a==c too — verifies hash captures content not RNG state.
+    CHECK_EQ((long long)a, (long long)c);
+
+    // Sanity: known glyph should produce a nonzero pixel hash (not blank).
+    Chip8 blank;
+    CHECK(a != blank.framebufferHash());
+}
+
 // -------- 12. CXNN with NN mask --------
 static void test_rnd_mask() {
     std::printf("\n[test_rnd_mask]\n");
@@ -460,6 +525,8 @@ int main() {
     test_events_misc();
     test_events_write_block();
     test_events_excluded_from_snapshot();
+    test_framebuffer_hash();
+    test_framebuffer_hash_seeded_program();
     test_rnd_mask();
 
     if (g_failures > 0) {
