@@ -153,11 +153,35 @@ Numbers: `12`, `0x12`, `$12`, `0b1010`, `%1010`. Labels are case-sensitive.
 Mnemonics are case-insensitive. See `demos/*.asm` for working examples
 (`hello`, `maze`, `bounce`, `mx8_demo`).
 
+## Event-driven state mutation
+
+All UI / debugger / scripted state changes flow through a typed event queue
+on the CPU, drained at the frame boundary. This is the foundation for
+deterministic replay, headless test scripting, and lockstep networking.
+
+```cpp
+cpu.enqueue(WriteMemoryEvent{0x300, 0xAB});       // mem editor
+cpu.enqueue(ToggleBreakpointEvent{0x250});         // debugger
+cpu.enqueue(SetWatchpointEvent{0x600, kind, false});
+cpu.enqueue(InjectKeyEvent{0xA, true});            // replay/scripting
+cpu.enqueue(SetSeedEvent{0xCAFEBABE});
+cpu.enqueue(ResetEvent{});
+// ... drained next frame, in FIFO order, at a known sync point.
+```
+
+Events are pure data (`std::variant`) — no lambdas, no captured state — so
+they are serializable, replayable, and safe to ship over a wire later.
+Only machine-state mutations are events; configuration (quirks, ISA
+choice, palette) and UI mode (paused / step / rewind) stay direct.
+
+See `src/core/CoreEvents.hpp` for the full type list.
+
 ## Project layout
 
 ```
 src/
-  core/      Chip8, Disassembler        # pure emulator, no SFML
+  core/      Chip8, Memory, CoreEvents, Disassembler   # pure emulator, no SFML
+  core/isa/  IInstructionSet, Chip8ISA, SchipISA, Mx8ISA
   ui/        Renderer, Input, AudioBeep, DebugView, RomBrowser, FontLoader
   app/       Config, App                # main loop + orchestration
   main.cpp                              # tiny CLI entry point

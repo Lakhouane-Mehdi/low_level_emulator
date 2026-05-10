@@ -102,6 +102,78 @@ void Chip8::installISA(IInstructionSet* isa) {
     if (isa) isa_ = isa;
 }
 
+// ---- event queue ----------------------------------------------------
+//
+// Drain order is FIFO. Each event is applied to completion before the
+// next is examined — applyEvent() can mutate memory (firing watchpoints),
+// halt the CPU, or otherwise have side effects. Subsequent events still
+// drain even if the CPU just halted; that matches user intent (you might
+// enqueue [Reset, LoadROM] together to recover from a bad halt).
+
+void Chip8::enqueue(CoreEvent ev) {
+    events_.push_back(std::move(ev));
+}
+
+void Chip8::drainEvents() {
+    while (!events_.empty()) {
+        CoreEvent ev = std::move(events_.front());
+        events_.pop_front();
+        std::visit([this](auto&& e) { applyEvent(e); }, ev);
+        ++total_events_applied_;
+    }
+}
+
+void Chip8::applyEvent(const ResetEvent&) {
+    reset();
+}
+
+void Chip8::applyEvent(const LoadROMEvent& ev) {
+    (void)loadROMBytes(ev.bytes);
+}
+
+void Chip8::applyEvent(const WriteMemoryEvent& ev) {
+    // Goes through the Memory API, so a watchpoint at this address fires
+    // exactly as if the CPU had written here itself. Bounds-checked.
+    mem.write(ev.addr, ev.value);
+}
+
+void Chip8::applyEvent(const WriteMemoryBlockEvent& ev) {
+    if (ev.bytes.empty()) return;
+    mem.write_block(ev.addr, ev.bytes.data(), ev.bytes.size());
+}
+
+void Chip8::applyEvent(const ToggleBreakpointEvent& ev) {
+    auto it = breakpoints.find(ev.addr);
+    if (it == breakpoints.end()) breakpoints.insert(ev.addr);
+    else                         breakpoints.erase(it);
+}
+
+void Chip8::applyEvent(const ClearAllBreakpointsEvent&) {
+    breakpoints.clear();
+}
+
+void Chip8::applyEvent(const SetWatchpointEvent& ev) {
+    if (ev.erase) mem.remove_watchpoint(ev.addr);
+    else          mem.add_watchpoint(ev.addr, ev.kind);
+}
+
+void Chip8::applyEvent(const ClearAllWatchpointsEvent&) {
+    mem.clear_watchpoints();
+}
+
+void Chip8::applyEvent(const SetPCEvent& ev) {
+    pc = ev.pc;
+    hit_breakpoint = false;   // moving PC clears any pending breakpoint pause
+}
+
+void Chip8::applyEvent(const InjectKeyEvent& ev) {
+    if (ev.key < KEY_COUNT) keys[ev.key] = ev.down ? 1 : 0;
+}
+
+void Chip8::applyEvent(const SetSeedEvent& ev) {
+    setSeed(ev.seed);
+}
+
 void Chip8::pushStack(uint16_t addr) {
     if (sp >= STACK_SIZE) { halt(HaltReason::StackOverflow); return; }
     stack[sp++] = addr;

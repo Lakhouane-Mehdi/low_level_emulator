@@ -1,4 +1,5 @@
 #include "App.hpp"
+#include "../core/CoreEvents.hpp"
 #include "../core/isa/IInstructionSet.hpp"
 #include "../ui/FontLoader.hpp"
 #include "../ui/RomBrowser.hpp"
@@ -108,6 +109,11 @@ bool App::drainWatchpoint(DebugView& dbg) {
 }
 
 void App::runFrameOfCpu(DebugView& dbg) {
+    // Deterministic event drain: applies any UI/debugger/script enqueued
+    // mutations to CPU state BEFORE the cycle batch. This is the single
+    // sync point where state changes from outside the CPU take effect.
+    cpu_.drainEvents();
+
     if (paused_) return;
     pushRewindFrame();
     for (int i = 0; i < cfg_.cycles_per_frame; ++i) {
@@ -182,7 +188,7 @@ void App::mainLoop() {
                 }
                 case K::B:
                     if (kp->shift) {
-                        cpu_.breakpoints.clear();
+                        cpu_.enqueue(ClearAllBreakpointsEvent{});
                         dbg.setStatusMessage("All breakpoints cleared");
                     } else {
                         dbg.toggleBreakpointAtPC(cpu_);
@@ -239,7 +245,7 @@ void App::mainLoop() {
                 case K::RBracket: if (paused_) dbg.editByteAtCursor(cpu_, +1); break;
                 case K::Hyphen:    onAdjustSpeed(-1); break;
                 case K::Equal:     onAdjustSpeed(+1); break;
-                case K::P:  cpu_.reset(); dbg.setStatusMessage("CPU reset"); break;
+                case K::P:  cpu_.enqueue(ResetEvent{}); dbg.setStatusMessage("CPU reset"); break;
                 case K::Tab:  // mute toggle
                     muted_ = !muted_;
                     dbg.setStatusMessage(muted_ ? "Audio muted" : "Audio unmuted");
@@ -261,17 +267,24 @@ void App::mainLoop() {
         }
 
         // ---- rewind / advance ----
+        // Every branch must drain pending events at a known boundary
+        // (typically before any cycle/restore) so debugger enqueues take
+        // effect even when paused or stepping. Rewind drains BEFORE the
+        // restore so any mid-rewind enqueue (rare) is honored against the
+        // current state, not the restored one.
         rewinding_ = sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Backspace);
         if (rewinding_ && !rewind_buf_.empty()) {
+            cpu_.drainEvents();
             cpu_.restore(rewind_buf_.back());
             rewind_buf_.pop_back();
         } else if (step_once_) {
+            cpu_.drainEvents();
             pushRewindFrame();
             cpu_.cycle();
             drainWatchpoint(dbg);   // surface trigger but stay paused
             step_once_ = false;
         } else {
-            runFrameOfCpu(dbg);
+            runFrameOfCpu(dbg);     // drains internally
         }
 
         // ---- output ----

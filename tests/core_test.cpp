@@ -6,6 +6,7 @@
 // Fail: prints the failing assertion + line and exits 1.
 
 #include "../src/core/Chip8.hpp"
+#include "../src/core/CoreEvents.hpp"
 #include "../src/core/Memory.hpp"
 #include "../src/core/isa/IInstructionSet.hpp"
 
@@ -288,6 +289,138 @@ static void test_disassembly_uses_widest_isa() {
     CHECK(isa.disassemble(0x6A05) == "LD VA, 05");
 }
 
+// -------- Events. Memory writes are deferred until drainEvents --------
+static void test_events_deferred() {
+    std::printf("\n[test_events_deferred]\n");
+    Chip8 cpu;
+    cpu.enqueue(WriteMemoryEvent{0x300, 0xAB});
+    // Pre-drain: byte unchanged.
+    CHECK_EQ((int)cpu.mem.peek(0x300), 0x00);
+    CHECK_EQ((int)cpu.pendingEvents(), 1);
+    cpu.drainEvents();
+    CHECK_EQ((int)cpu.mem.peek(0x300), 0xAB);
+    CHECK_EQ((int)cpu.pendingEvents(), 0);
+    CHECK_EQ((int)cpu.totalEventsApplied(), 1);
+}
+
+// -------- Events. FIFO ordering --------
+static void test_events_fifo() {
+    std::printf("\n[test_events_fifo]\n");
+    Chip8 cpu;
+    // Enqueue three writes to the same address; final value must be the last.
+    cpu.enqueue(WriteMemoryEvent{0x400, 0x11});
+    cpu.enqueue(WriteMemoryEvent{0x400, 0x22});
+    cpu.enqueue(WriteMemoryEvent{0x400, 0x33});
+    cpu.drainEvents();
+    CHECK_EQ((int)cpu.mem.peek(0x400), 0x33);
+    CHECK_EQ((int)cpu.totalEventsApplied(), 3);
+}
+
+// -------- Events. WriteMemory fires watchpoints same as CPU-driven writes --------
+static void test_events_fire_watchpoints() {
+    std::printf("\n[test_events_fire_watchpoints]\n");
+    Chip8 cpu;
+    cpu.mem.add_watchpoint(0x500, Memory::WatchKind::Write);
+    cpu.enqueue(WriteMemoryEvent{0x500, 0x99});
+    CHECK(!cpu.mem.watch_triggered());     // pre-drain: nothing happened yet
+    cpu.drainEvents();
+    CHECK(cpu.mem.watch_triggered());      // post-drain: watchpoint fired
+    auto ev = cpu.mem.consume_watch_event();
+    CHECK_EQ((int)ev.addr,  0x500);
+    CHECK_EQ((int)ev.value, 0x99);
+}
+
+// -------- Events. ToggleBreakpoint + ClearAll --------
+static void test_events_breakpoints() {
+    std::printf("\n[test_events_breakpoints]\n");
+    Chip8 cpu;
+    cpu.enqueue(ToggleBreakpointEvent{0x250});
+    cpu.enqueue(ToggleBreakpointEvent{0x260});
+    cpu.drainEvents();
+    CHECK_EQ((int)cpu.breakpoints.size(), 2);
+    cpu.enqueue(ToggleBreakpointEvent{0x250});   // toggle off
+    cpu.drainEvents();
+    CHECK_EQ((int)cpu.breakpoints.size(), 1);
+    CHECK(cpu.breakpoints.count(0x260) == 1);
+    cpu.enqueue(ClearAllBreakpointsEvent{});
+    cpu.drainEvents();
+    CHECK_EQ((int)cpu.breakpoints.size(), 0);
+}
+
+// -------- Events. Watchpoint set/clear via events --------
+static void test_events_watchpoints_via_events() {
+    std::printf("\n[test_events_watchpoints_via_events]\n");
+    Chip8 cpu;
+    using WK = Memory::WatchKind;
+    cpu.enqueue(SetWatchpointEvent{0x600, WK::Read,  false});
+    cpu.enqueue(SetWatchpointEvent{0x601, WK::Write, false});
+    cpu.drainEvents();
+    CHECK(cpu.mem.has_watchpoint(0x600));
+    CHECK(cpu.mem.has_watchpoint(0x601));
+    cpu.enqueue(SetWatchpointEvent{0x600, WK::Read, true});  // erase
+    cpu.drainEvents();
+    CHECK(!cpu.mem.has_watchpoint(0x600));
+    cpu.enqueue(ClearAllWatchpointsEvent{});
+    cpu.drainEvents();
+    CHECK(!cpu.mem.has_watchpoint(0x601));
+}
+
+// -------- Events. SetPC + InjectKey + Reset + SetSeed --------
+static void test_events_misc() {
+    std::printf("\n[test_events_misc]\n");
+    Chip8 cpu;
+    cpu.pc = 0x200;
+    cpu.enqueue(SetPCEvent{0x300});
+    cpu.enqueue(InjectKeyEvent{0xA, true});
+    cpu.enqueue(SetSeedEvent{0xCAFEBABE});
+    cpu.drainEvents();
+    CHECK_EQ((int)cpu.pc, 0x300);
+    CHECK_EQ((int)cpu.keys[0xA], 1);
+
+    // Capture RNG output after seed-via-event; reseed direct, compare.
+    Chip8 reference;
+    reference.setSeed(0xCAFEBABE);
+    CHECK_EQ((int)(cpu.rng.next() & 0xFF), (int)(reference.rng.next() & 0xFF));
+
+    // Reset event puts PC back to 0x200 and clears keys.
+    cpu.enqueue(ResetEvent{});
+    cpu.drainEvents();
+    CHECK_EQ((int)cpu.pc, 0x200);
+    CHECK_EQ((int)cpu.keys[0xA], 0);
+}
+
+// -------- Events. WriteMemoryBlockEvent --------
+static void test_events_write_block() {
+    std::printf("\n[test_events_write_block]\n");
+    Chip8 cpu;
+    std::vector<uint8_t> patch = {0xDE, 0xAD, 0xBE, 0xEF};
+    cpu.enqueue(WriteMemoryBlockEvent{0x700, patch});
+    cpu.drainEvents();
+    CHECK_EQ((int)cpu.mem.peek(0x700), 0xDE);
+    CHECK_EQ((int)cpu.mem.peek(0x701), 0xAD);
+    CHECK_EQ((int)cpu.mem.peek(0x702), 0xBE);
+    CHECK_EQ((int)cpu.mem.peek(0x703), 0xEF);
+}
+
+// -------- Events. Snapshot does NOT carry queue (queue is host-side) --------
+// The event queue is conceptually a UI-to-CPU mailbox. Snapshots capture
+// machine state, not in-flight messages — otherwise rewinding through a
+// pending action would re-replay it spuriously.
+static void test_events_excluded_from_snapshot() {
+    std::printf("\n[test_events_excluded_from_snapshot]\n");
+    Chip8 cpu;
+    auto pre = cpu.snapshot();
+    cpu.enqueue(WriteMemoryEvent{0x100, 0xFF});
+    CHECK_EQ((int)cpu.pendingEvents(), 1);
+    cpu.restore(pre);                       // restore mid-queue
+    // The pending event survives a restore — it's host-side state, not
+    // captured in the snapshot. This is the right semantic: the user
+    // pressed a key, the keypress shouldn't be cancelled by a rewind.
+    CHECK_EQ((int)cpu.pendingEvents(), 1);
+    cpu.drainEvents();
+    CHECK_EQ((int)cpu.mem.peek(0x100), 0xFF);
+}
+
 // -------- 12. CXNN with NN mask --------
 static void test_rnd_mask() {
     std::printf("\n[test_rnd_mask]\n");
@@ -319,6 +452,14 @@ int main() {
     test_schip_isa_runs_high();
     test_schip_isa_rejects_mx8();
     test_disassembly_uses_widest_isa();
+    test_events_deferred();
+    test_events_fifo();
+    test_events_fire_watchpoints();
+    test_events_breakpoints();
+    test_events_watchpoints_via_events();
+    test_events_misc();
+    test_events_write_block();
+    test_events_excluded_from_snapshot();
     test_rnd_mask();
 
     if (g_failures > 0) {

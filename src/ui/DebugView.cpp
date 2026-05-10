@@ -1,4 +1,5 @@
 #include "DebugView.hpp"
+#include "../core/CoreEvents.hpp"
 #include "../core/Disassembler.hpp"
 
 #include <algorithm>
@@ -20,16 +21,14 @@ void DebugView::toggleBreakpointAtPC(Chip8& cpu) {
 }
 
 void DebugView::toggleBreakpointAt(Chip8& cpu, uint16_t addr) {
-    auto it = cpu.breakpoints.find(addr);
-    if (it == cpu.breakpoints.end()) {
-        cpu.breakpoints.insert(addr);
-        char buf[48]; std::snprintf(buf, sizeof(buf), "Breakpoint set @ %03X", addr);
-        setStatusMessage(buf);
-    } else {
-        cpu.breakpoints.erase(it);
-        char buf[48]; std::snprintf(buf, sizeof(buf), "Breakpoint cleared @ %03X", addr);
-        setStatusMessage(buf);
-    }
+    // Status text reads the *current* breakpoint set (pre-toggle) since
+    // the actual toggle applies on the next drainEvents() call.
+    bool was_set = cpu.breakpoints.count(addr) > 0;
+    cpu.enqueue(ToggleBreakpointEvent{addr});
+    char buf[48];
+    std::snprintf(buf, sizeof(buf),
+                  was_set ? "Breakpoint cleared @ %03X" : "Breakpoint set @ %03X", addr);
+    setStatusMessage(buf);
 }
 
 void DebugView::cycleMemPane() {
@@ -47,22 +46,23 @@ void DebugView::moveCursor(int delta) {
 }
 
 void DebugView::cycleWatchpointAtCursor(Chip8& cpu) {
+    // Cycle: none -> R -> W -> RW -> none. Decisions made against current
+    // state; the actual mutation applies on next drainEvents().
     using WK = Memory::WatchKind;
     char buf[64];
     if (!cpu.mem.has_watchpoint(mem_cursor_)) {
-        cpu.mem.add_watchpoint(mem_cursor_, WK::Read);
+        cpu.enqueue(SetWatchpointEvent{mem_cursor_, WK::Read, false});
         std::snprintf(buf, sizeof(buf), "Watch READ @ %03X", mem_cursor_);
     } else {
-        // We need the current kind — the public API gives us the whole map.
         WK cur = cpu.mem.watchpoints().at(mem_cursor_);
         if (cur == WK::Read) {
-            cpu.mem.add_watchpoint(mem_cursor_, WK::Write);
+            cpu.enqueue(SetWatchpointEvent{mem_cursor_, WK::Write, false});
             std::snprintf(buf, sizeof(buf), "Watch WRITE @ %03X", mem_cursor_);
         } else if (cur == WK::Write) {
-            cpu.mem.add_watchpoint(mem_cursor_, WK::Both);
+            cpu.enqueue(SetWatchpointEvent{mem_cursor_, WK::Both, false});
             std::snprintf(buf, sizeof(buf), "Watch RW @ %03X", mem_cursor_);
         } else {
-            cpu.mem.remove_watchpoint(mem_cursor_);
+            cpu.enqueue(SetWatchpointEvent{mem_cursor_, WK::Read, true});
             std::snprintf(buf, sizeof(buf), "Watch cleared @ %03X", mem_cursor_);
         }
     }
@@ -70,18 +70,20 @@ void DebugView::cycleWatchpointAtCursor(Chip8& cpu) {
 }
 
 void DebugView::clearAllWatchpoints(Chip8& cpu) {
-    cpu.mem.clear_watchpoints();
+    cpu.enqueue(ClearAllWatchpointsEvent{});
     setStatusMessage("All watchpoints cleared");
 }
 
 void DebugView::editByteAtCursor(Chip8& cpu, int delta) {
-    // Mid-execution memory editor — every write goes through the Memory
-    // API, so a watchpoint set on the cursor address fires here too.
-    uint8_t cur = cpu.mem.peek(mem_cursor_);
-    cpu.mem.write(mem_cursor_, static_cast<uint8_t>(cur + delta));
+    // Mid-execution memory editor: enqueue a WriteMemory event. The next
+    // drainEvents() call (typically next frame) applies the write through
+    // the Memory API, firing any watchpoint at the cursor.
+    uint8_t cur  = cpu.mem.peek(mem_cursor_);
+    uint8_t next = static_cast<uint8_t>(cur + delta);
+    cpu.enqueue(WriteMemoryEvent{mem_cursor_, next});
     char buf[48];
-    std::snprintf(buf, sizeof(buf), "mem[%03X]: %02X -> %02X",
-                  mem_cursor_, cur, cpu.mem.peek(mem_cursor_));
+    std::snprintf(buf, sizeof(buf), "mem[%03X]: %02X -> %02X (queued)",
+                  mem_cursor_, cur, next);
     setStatusMessage(buf);
 }
 

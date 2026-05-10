@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CoreEvents.hpp"
 #include "Memory.hpp"
 
 #include <array>
@@ -189,6 +190,15 @@ public:
     void                installISA(class IInstructionSet* isa);
     class IInstructionSet* getISA() const { return isa_; }
 
+    // ---- event queue (state mutation channel for UI/debugger/scripts) ----
+    // enqueue() is non-blocking; events apply on the next drainEvents() call.
+    // drainEvents() must be called at a deterministic sync point — the App
+    // calls it once per frame, before the cycle batch. Never call mid-cycle.
+    void   enqueue(CoreEvent ev);
+    void   drainEvents();
+    size_t pendingEvents() const { return events_.size(); }
+    uint64_t totalEventsApplied() const { return total_events_applied_; }
+
     // ---- machine API the ISA programs against ----
     // These are the only "non-trivial" mutators. Trivial ops (PC+=2, V[x]=nn,
     // index=nnn, etc.) the ISA does directly via the public state fields.
@@ -212,5 +222,21 @@ public:
 private:
     void recordTrace(uint16_t pc, uint16_t op);
 
+    // Per-event-type appliers. Hidden behind drainEvents()'s std::visit.
+    void applyEvent(const ResetEvent&);
+    void applyEvent(const LoadROMEvent&);
+    void applyEvent(const WriteMemoryEvent&);
+    void applyEvent(const WriteMemoryBlockEvent&);
+    void applyEvent(const ToggleBreakpointEvent&);
+    void applyEvent(const ClearAllBreakpointsEvent&);
+    void applyEvent(const SetWatchpointEvent&);
+    void applyEvent(const ClearAllWatchpointsEvent&);
+    void applyEvent(const SetPCEvent&);
+    void applyEvent(const InjectKeyEvent&);
+    void applyEvent(const SetSeedEvent&);
+
     class IInstructionSet* isa_ = nullptr;   // not owned; see installISA
+
+    std::deque<CoreEvent>  events_;
+    uint64_t               total_events_applied_ = 0;   // diagnostic counter
 };
