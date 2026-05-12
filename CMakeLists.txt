@@ -29,6 +29,7 @@ add_executable(chip8
     src/ui/AudioBeep.cpp
     src/ui/DebugView.cpp
     src/ui/RomBrowser.cpp
+    src/ui/PauseMenu.cpp
     src/ui/FontLoader.cpp
     src/app/App.cpp
 )

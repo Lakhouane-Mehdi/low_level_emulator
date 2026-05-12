@@ -8,6 +8,7 @@
 #include "../ui/Input.hpp"
 #include "../ui/AudioBeep.hpp"
 #include "../ui/DebugView.hpp"
+#include "../ui/PauseMenu.hpp"
 
 #include <SFML/Graphics.hpp>
 #include <optional>
@@ -27,6 +28,8 @@ private:
     bool                       step_once_    = false;
     bool                       rewinding_    = false;
     bool                       muted_        = false;
+    bool                       menu_open_    = false;   // pause menu is modal
+    bool                       want_change_rom_ = false;  // signal mainLoop to re-pick
 
     // Step-over: run until pc reaches `step_over_target_` (the instruction
     // immediately after a CALL). Step-out: run until SP drops below the

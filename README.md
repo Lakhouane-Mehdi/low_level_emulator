@@ -86,7 +86,7 @@ A 0 B F          Z X C V
 
 | Key | Action |
 |---|---|
-| `Esc`           | Quit |
+| `Esc`           | Open pause menu (Quit lives in the menu now; Alt+F4 still works) |
 | `Space`         | Pause / resume |
 | `N`             | Single step (paused) |
 | `O`             | Step over a `CALL` (otherwise same as N) |

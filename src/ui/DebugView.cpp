@@ -227,6 +227,7 @@ std::string DebugView::buildText(const Chip8& cpu, bool paused, bool rewinding,
     if (status_frames_ > 0) {
         s << "\n>> " << status_;
     }
+    s << "\n\n-- Made by Mehdi Lakhouane --";
     return s.str();
 }
 

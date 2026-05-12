@@ -39,7 +39,7 @@ bool App::initWindow() {
     window_.create(
         sf::VideoMode({static_cast<unsigned>(cfg_.windowWidth()),
                        static_cast<unsigned>(cfg_.windowHeight())}),
-        "CHIP-8 Emulator + Debugger");
+        "CHIP-8 Emulator + Debugger   —   Made by Mehdi Lakhouane");
     window_.setFramerateLimit(60);
 
     auto loaded = loadMonoFont(font_);
@@ -86,7 +86,8 @@ bool App::selectROM() {
     // Apply deterministic seed AFTER load so reset() inside loadROM doesn't
     // matter (reset() preserves rng anyway, but explicit > implicit).
     if (cfg_.rng_seed >= 0) cpu_.setSeed(static_cast<uint64_t>(cfg_.rng_seed));
-    window_.setTitle("CHIP-8: " + romPath.filename().string());
+    window_.setTitle("CHIP-8: " + romPath.filename().string() +
+                     "   —   Made by Mehdi Lakhouane");
     return true;
 }
 
@@ -259,16 +260,61 @@ void App::mainLoop() {
                   static_cast<float>(cfg_.windowHeight()));
     dbg.setStatusMessage("Ready", 60);
 
+    PauseMenu menu(font_, cfg_, cpu_.quirks);
+    menu.setGameArea(0.f, 0.f,
+                     static_cast<float>(cfg_.gameWidth()),
+                     static_cast<float>(cfg_.windowHeight()));
+
     while (window_.isOpen()) {
         // ---- events ----
         while (const std::optional event = window_.pollEvent()) {
             if (event->is<sf::Event::Closed>()) { window_.close(); break; }
 
+            // Modal pause menu: when open, it consumes all input and decides
+            // when to close, what action to take, etc. Game cycles also
+            // stop while open (paused_ remains true).
+            if (menu_open_) {
+                auto r = menu.handleEvent(*event);
+                if (r == PauseMenu::Result::Resume) {
+                    menu_open_ = false;
+                    paused_    = false;
+                } else if (r == PauseMenu::Result::Step) {
+                    step_once_ = true;
+                    // Stay paused after the step — but close the menu so the
+                    // step takes effect on the next frame.
+                    menu_open_ = false;
+                    paused_    = true;
+                } else if (r == PauseMenu::Result::SaveState) {
+                    onSaveState();
+                    dbg.setStatusMessage("State saved");
+                } else if (r == PauseMenu::Result::LoadState) {
+                    if (saved_state_) { onLoadState(); dbg.setStatusMessage("State loaded"); }
+                    else              { dbg.setStatusMessage("No save state"); }
+                } else if (r == PauseMenu::Result::ResetCPU) {
+                    cpu_.enqueue(ResetEvent{});
+                    dbg.setStatusMessage("CPU reset queued");
+                    menu_open_ = false;
+                    paused_    = false;
+                } else if (r == PauseMenu::Result::ChangeROM) {
+                    want_change_rom_ = true;
+                    menu_open_ = false;
+                } else if (r == PauseMenu::Result::Quit) {
+                    window_.close();
+                }
+                continue;       // do not run normal keyboard handling
+            }
+
             if (const auto* kp = event->getIf<sf::Event::KeyPressed>()) {
                 using K = sf::Keyboard::Key;
                 bool consumed = true;
                 switch (kp->code) {
-                case K::Escape: window_.close(); break;
+                case K::Escape:
+                    // Open the modal pause menu. (Quit lives on the menu's
+                    // Quit item now; Alt+F4 still closes the window directly.)
+                    menu_open_ = true;
+                    paused_    = true;
+                    menu.open();
+                    break;
                 case K::Space:  paused_ = !paused_; break;
                 case K::N:
                     if (paused_) step_once_ = true;
@@ -430,6 +476,24 @@ void App::mainLoop() {
             rewind_frames = static_cast<size_t>(frame_ordinal_ - anchors.front());
         }
         dbg.draw(window_, cpu_, paused_, rewinding_, rewind_frames, cfg_.cycles_per_frame);
+        // Menu is drawn last so it overlays the game area. Sidebar stays
+        // visible alongside the menu — useful for debugging while paused.
+        if (menu_open_) menu.draw(window_);
         window_.display();
+
+        // Change-ROM transition: leave the inner loop to re-pick a ROM,
+        // then re-enter mainLoop() implicitly via the outer caller.
+        if (want_change_rom_) {
+            want_change_rom_ = false;
+            cfg_.rom_path.clear();   // force the picker on selectROM
+            if (!selectROM()) { window_.close(); return; }
+            // Reset transient runtime state that's per-ROM.
+            paused_ = cfg_.start_paused;
+            rewind_buf_.clear();
+            frame_ordinal_ = 0;
+            saved_state_.reset();
+            recording_ = false;
+            dbg.setStatusMessage("ROM loaded", 90);
+        }
     }
 }
