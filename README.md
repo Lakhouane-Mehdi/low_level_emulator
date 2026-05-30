@@ -335,6 +335,17 @@ The bundled `roms/tests/` already contains Timendus's full eight-stage
 CHIP-8 test suite (chip8-logo, ibm-logo, corax+, flags, quirks, keypad,
 beep, scrolling).
 
+For XO-CHIP, five real CC0 ROMs from JohnEarnest/chip8Archive ship under
+`roms/*_XO.ch8` (Skyward, jub8 Song 1, T8NKS, Octoma, Flutter By) and are
+wired into the headless golden suite — two of them are 55-56KB and only
+load thanks to the 64KB address space. See [roms/CREDITS.md](roms/CREDITS.md)
+for provenance.
+
+```
+build/Release/chip8.exe roms/SKYWARD_XO.ch8 --xochip
+python tools/test_headless.py        # includes the xo_* golden checks
+```
+
 ## Author
 
 Made by Mehdi Lakhouane.

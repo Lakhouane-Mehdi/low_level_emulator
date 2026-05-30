@@ -49,6 +49,17 @@ GOLDEN: list[tuple[str, str, list[str], int, str | None]] = [
     # long-load. Halts with EXIT (rc 2). Exercises the whole XO-CHIP path
     # (plane select, plane-aware DRW, F000 long-load) in one golden.
     ("xo_demo",           "roms/xo_demo.ch8",   ["--isa", "xochip"],   5,   "0xB8355919A23324AD"),
+
+    # Real XO-CHIP ROMs from JohnEarnest/chip8Archive (CC0). These validate
+    # the ISA against actual programs, not just synthetic demos. JUB8 (56KB)
+    # and SKYWARD (55KB) also prove >4KB ROM loading on the widened 64KB
+    # memory — they could not even load before XO-CHIP. Each settles to a
+    # stable framebuffer by frame 180; FLUTTERBY uses RNG so it is seeded.
+    ("xo_skyward",   "roms/SKYWARD_XO.ch8",    ["--isa", "xochip"],              180, "0xA0C1209795388669"),
+    ("xo_octoma",    "roms/OCTOMA_XO.ch8",     ["--isa", "xochip"],              180, "0x82D84C29D80F0A6B"),
+    ("xo_t8nks",     "roms/T8NKS_XO.ch8",      ["--isa", "xochip"],              180, "0xA4FB9C1E3C25EF29"),
+    ("xo_jub8_song1","roms/JUB8_SONG1_XO.ch8", ["--isa", "xochip"],              180, "0xEF79EB4E0D670D97"),
+    ("xo_flutterby", "roms/FLUTTERBY_XO.ch8",  ["--isa", "xochip", "--seed", "42"], 180, "0x006117F73446DCDD"),
 ]
 
 HASH_RE = re.compile(r"hash=(0x[0-9A-Fa-f]+)")
