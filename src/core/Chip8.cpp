@@ -205,6 +205,11 @@ void Chip8::reset() {
     hires = false;
     waiting_vblank = false;
     halt_reason = HaltReason::Running;
+    // XO-CHIP state resets to classic-equivalent defaults: only plane 0 is
+    // selected, audio buffer cleared, pitch at the XO-CHIP default.
+    plane_mask = 1;
+    audio_pattern.fill(0);
+    audio_pitch = 64;
     hit_breakpoint = false;
     total_cycles = 0;
     last_pc = 0;
@@ -304,6 +309,13 @@ Chip8::StateDigest Chip8::stateDigest() const {
     uint8_t hires_byte = d.hires ? 1 : 0;
     mix(&hires_byte,         sizeof(hires_byte));
     mix(&d.halt_reason,      sizeof(d.halt_reason));
+    // XO-CHIP extended state. Mixing these in lets --diff-replay localize a
+    // plane-select or audio-buffer divergence. For classic ROMs these hold
+    // their reset defaults (plane_mask=1, pattern=0, pitch=64) on both sides
+    // of any comparison, so they never produce spurious diffs.
+    mix(&plane_mask,         sizeof(plane_mask));
+    mix(audio_pattern.data(), audio_pattern.size());
+    mix(&audio_pitch,        sizeof(audio_pitch));
     d.state_hash = h;
 
     return d;
@@ -399,6 +411,14 @@ void Chip8::tickTimers() {
 // reimplementing framebuffer manipulation. Honors quirks.clip_sprites and
 // quirks.display_wait, sets VF on collision, draws SCHIP 16x16 sprites
 // when n==0 in hires mode.
+//
+// XO-CHIP: display[] cells hold a per-plane bitmask. plane_mask selects which
+// planes are drawn to. When more than one plane is selected, the sprite data
+// for each selected plane is read consecutively from memory (plane 0's rows
+// first, then plane 1's). VF is set if ANY lit pixel on ANY drawn plane is
+// erased. For classic ROMs plane_mask == 1, so exactly one plane is touched
+// and a lit pixel is value 1 — byte-identical to the pre-XO behavior, which
+// is what keeps the framebuffer-hash golden tests stable.
 void Chip8::drawSprite(uint8_t vx, uint8_t vy, uint8_t n) {
     const int w = hires ? DISPLAY_WIDTH  : LORES_WIDTH;
     const int h = hires ? DISPLAY_HEIGHT : LORES_HEIGHT;
@@ -406,40 +426,55 @@ void Chip8::drawSprite(uint8_t vx, uint8_t vy, uint8_t n) {
     const uint8_t startY = v[vy] % h;
     v[0xF] = 0;
 
-    const bool wide = (hires && n == 0);   // SUPER-CHIP 16x16 sprite
+    const bool wide = (hires && n == 0);   // SUPER-CHIP / XO-CHIP 16x16 sprite
     const int rows = wide ? 16 : n;
     const int cols = wide ? 16 : 8;
+    const int bytes_per_row = wide ? 2 : 1;
 
-    for (int row = 0; row < rows; ++row) {
-        int py = startY + row;
-        if (quirks.clip_sprites) { if (py >= h) break; }
-        else py %= h;
+    // Source address walks forward across planes: each selected plane consumes
+    // a full sprite's worth of bytes before the next plane begins.
+    uint16_t addr = index;
+    bool collided = false;
 
-        uint16_t spriteRow;
-        uint16_t addr0 = wide ? (index + row * 2) : (index + row);
-        if (addr0 + (wide ? 1u : 0u) >= MEMORY_SIZE) {
-            halt(HaltReason::BadMemoryAccess); return;
-        }
-        if (wide) {
-            uint8_t hi = mem.read(addr0);
-            uint8_t lo = mem.read(addr0 + 1);
-            spriteRow = static_cast<uint16_t>((hi << 8) | lo);
-        } else {
-            spriteRow = mem.read(addr0);
-        }
+    for (int p = 0; p < PLANE_COUNT; ++p) {
+        const uint8_t plane_bit = static_cast<uint8_t>(1u << p);
+        if ((plane_mask & plane_bit) == 0) continue;
 
-        const uint16_t mask = wide ? 0x8000 : 0x80;
-        for (int col = 0; col < cols; ++col) {
-            int px = startX + col;
-            if (quirks.clip_sprites) { if (px >= w) break; }
-            else px %= w;
-            if ((spriteRow & (mask >> col)) == 0) continue;
+        for (int row = 0; row < rows; ++row) {
+            int py = startY + row;
+            bool row_clipped = false;
+            if (quirks.clip_sprites) { if (py >= h) row_clipped = true; }
+            else py %= h;
 
-            uint32_t* pixel = &display[py * DISPLAY_WIDTH + px];
-            if (*pixel == PIXEL_ON) v[0xF] = 1;
-            *pixel ^= PIXEL_ON;
+            uint16_t spriteRow = 0;
+            if (addr + (bytes_per_row - 1) >= MEMORY_SIZE) {
+                halt(HaltReason::BadMemoryAccess); return;
+            }
+            if (wide) {
+                uint8_t hi = mem.read(addr);
+                uint8_t lo = mem.read(addr + 1);
+                spriteRow = static_cast<uint16_t>((hi << 8) | lo);
+            } else {
+                spriteRow = mem.read(addr);
+            }
+            addr += bytes_per_row;   // advance source even if this row clipped
+
+            if (row_clipped) continue;
+
+            const uint16_t mask = wide ? 0x8000 : 0x80;
+            for (int col = 0; col < cols; ++col) {
+                int px = startX + col;
+                if (quirks.clip_sprites) { if (px >= w) break; }
+                else px %= w;
+                if ((spriteRow & (mask >> col)) == 0) continue;
+
+                uint32_t* cell = &display[py * DISPLAY_WIDTH + px];
+                if (*cell & plane_bit) collided = true;   // erasing a lit pixel
+                *cell ^= plane_bit;
+            }
         }
     }
+    if (collided) v[0xF] = 1;
     draw_flag = true;
     if (quirks.display_wait && !hires) waiting_vblank = true;
 }
@@ -498,6 +533,80 @@ void Chip8::scrollLeft() {
     draw_flag = true;
 }
 
+// ---------- XO-CHIP plane-aware scrolls ----------
+//
+// These move only the bits belonging to the currently selected planes
+// (plane_mask), leaving bits on other planes where they are. Implemented as:
+// read the old plane bits at the source cell, clear those bits at the dest,
+// then OR the shifted bits in. Vacated source cells lose their selected-plane
+// bits. The non-selected plane bits in each cell are preserved verbatim.
+namespace {
+inline uint32_t shiftPlanes(uint32_t dst_cell, uint32_t src_bits, uint8_t mask) {
+    // Replace the masked planes of dst_cell with src_bits (already masked).
+    return (dst_cell & ~static_cast<uint32_t>(mask)) | (src_bits & mask);
+}
+} // namespace
+
+void Chip8::scrollDownPlanes(int lines) {
+    const int w = hires ? DISPLAY_WIDTH  : LORES_WIDTH;
+    const int h = hires ? DISPLAY_HEIGHT : LORES_HEIGHT;
+    const uint8_t m = plane_mask;
+    for (int yy = h - 1; yy >= 0; --yy) {
+        for (int xx = 0; xx < w; ++xx) {
+            uint32_t src = (yy - lines >= 0)
+                ? (display[(yy - lines) * DISPLAY_WIDTH + xx] & m) : 0u;
+            uint32_t& cell = display[yy * DISPLAY_WIDTH + xx];
+            cell = shiftPlanes(cell, src, m);
+        }
+    }
+    draw_flag = true;
+}
+
+void Chip8::scrollUpPlanes(int lines) {
+    const int w = hires ? DISPLAY_WIDTH  : LORES_WIDTH;
+    const int h = hires ? DISPLAY_HEIGHT : LORES_HEIGHT;
+    const uint8_t m = plane_mask;
+    for (int yy = 0; yy < h; ++yy) {
+        for (int xx = 0; xx < w; ++xx) {
+            uint32_t src = (yy + lines < h)
+                ? (display[(yy + lines) * DISPLAY_WIDTH + xx] & m) : 0u;
+            uint32_t& cell = display[yy * DISPLAY_WIDTH + xx];
+            cell = shiftPlanes(cell, src, m);
+        }
+    }
+    draw_flag = true;
+}
+
+void Chip8::scrollRightPlanes(int pixels) {
+    const int w = hires ? DISPLAY_WIDTH  : LORES_WIDTH;
+    const int h = hires ? DISPLAY_HEIGHT : LORES_HEIGHT;
+    const uint8_t m = plane_mask;
+    for (int yy = 0; yy < h; ++yy) {
+        for (int xx = w - 1; xx >= 0; --xx) {
+            uint32_t src = (xx - pixels >= 0)
+                ? (display[yy * DISPLAY_WIDTH + (xx - pixels)] & m) : 0u;
+            uint32_t& cell = display[yy * DISPLAY_WIDTH + xx];
+            cell = shiftPlanes(cell, src, m);
+        }
+    }
+    draw_flag = true;
+}
+
+void Chip8::scrollLeftPlanes(int pixels) {
+    const int w = hires ? DISPLAY_WIDTH  : LORES_WIDTH;
+    const int h = hires ? DISPLAY_HEIGHT : LORES_HEIGHT;
+    const uint8_t m = plane_mask;
+    for (int yy = 0; yy < h; ++yy) {
+        for (int xx = 0; xx < w; ++xx) {
+            uint32_t src = (xx + pixels < w)
+                ? (display[yy * DISPLAY_WIDTH + (xx + pixels)] & m) : 0u;
+            uint32_t& cell = display[yy * DISPLAY_WIDTH + xx];
+            cell = shiftPlanes(cell, src, m);
+        }
+    }
+    draw_flag = true;
+}
+
 // ---------- snapshots ----------
 Chip8::Snapshot Chip8::snapshot() const {
     Snapshot s;
@@ -517,6 +626,9 @@ Chip8::Snapshot Chip8::snapshot() const {
     s.quirks = quirks;
     s.rng = rng;          // v3: PRNG state
     s.keys = keys;        // v3: keypad latch — restore() in mid-keyhold rewind
+    s.plane_mask    = plane_mask;     // v4: XO-CHIP
+    s.audio_pattern = audio_pattern;
+    s.audio_pitch   = audio_pitch;
     return s;
 }
 
@@ -541,6 +653,17 @@ void Chip8::restore(const Snapshot& s) {
     if (s.version >= 3) {
         rng  = s.rng;
         keys = s.keys;
+    }
+    if (s.version >= 4) {
+        plane_mask    = s.plane_mask;
+        audio_pattern = s.audio_pattern;
+        audio_pitch   = s.audio_pitch;
+    } else {
+        // Pre-XO snapshot: reset XO state to classic-equivalent defaults so a
+        // restore is fully determined rather than leaving stale values.
+        plane_mask = 1;
+        audio_pattern.fill(0);
+        audio_pitch = 64;
     }
     draw_flag = true;
     hit_breakpoint = false;

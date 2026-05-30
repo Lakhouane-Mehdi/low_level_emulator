@@ -94,10 +94,20 @@ static void test_memory_bounds() {
     Memory m;
     m.write(0x100, 0xAB);
     CHECK_EQ((int)m.read(0x100), 0xAB);
-    CHECK_EQ((int)m.read(0xFFFF), 0);   // OOR -> 0
+    // XO-CHIP widened memory to 64KB, so 0xFFFF is now the *last valid* byte
+    // rather than out-of-range. Single-byte read()/write() take a uint16_t,
+    // so they can no longer address past the end — every address is in range.
+    CHECK_EQ((size_t)Memory::SIZE, (size_t)65536);
+    m.write(0xFFFF, 0xCD);
+    CHECK_EQ((int)m.read(0xFFFF), 0xCD);   // top byte is addressable now
+    // The bad-access path is still exercised by block ops that straddle the
+    // upper boundary: a read_block starting near the top that asks for more
+    // bytes than remain must signal a fault and stop at the boundary.
     bool fault = false;
     m.set_bad_access_callback([&](Memory::FaultKind, uint16_t) { fault = true; });
-    (void)m.read(0xFFFF);
+    uint8_t buf[8] = {0};
+    std::size_t got = m.read_block(0xFFFE, buf, 8);   // only 2 bytes remain
+    CHECK_EQ((size_t)got, (size_t)2);
     CHECK(fault);
 }
 
@@ -957,6 +967,200 @@ static void test_rnd_mask() {
     CHECK(true);
 }
 
+// ============================================================
+//  XO-CHIP instruction set
+// ============================================================
+
+// -------- XO. FN01 selects the draw-plane bitmask --------
+static void test_xo_plane_select() {
+    std::printf("\n[test_xo_plane_select]\n");
+    Chip8 cpu;
+    cpu.installISA(&ISA::xochip());
+    CHECK_EQ((int)cpu.plane_mask, 1);        // default = plane 0 only
+    load(cpu, {0xF201, 0x1202});             // PLANE 2 (V-nibble = 2)
+    cpu.cycle();
+    CHECK(!cpu.halted());
+    CHECK_EQ((int)cpu.plane_mask, 2);
+}
+
+// -------- XO. Drawing on plane 1 leaves plane 0 untouched, and both
+// planes coexist in one cell --------
+static void test_xo_plane_aware_draw() {
+    std::printf("\n[test_xo_plane_aware_draw]\n");
+    Chip8 cpu;
+    cpu.installISA(&ISA::xochip());
+    // Program: LD V0,0; LD V1,0; LD I,0x300;
+    //          PLANE 1; DRW V0,V1,1;   (draw on plane 0)
+    //          PLANE 2; DRW V0,V1,1;   (draw same pixel on plane 1)
+    load(cpu, {
+        0x6000, 0x6100, 0xA300,
+        0xF101, 0xD011,
+        0xF201, 0xD011,
+        0x1212
+    });
+    // Sprite = one row 0x80 (single leftmost pixel). Written AFTER load()
+    // because loadROMBytes() resets memory.
+    cpu.mem.write(0x300, 0x80);
+    for (int i = 0; i < 7; ++i) cpu.cycle();
+    CHECK(!cpu.halted());
+    // Pixel (0,0) should now carry BOTH plane bits => value 3.
+    CHECK_EQ((int)cpu.display[0], 3);
+    // No collision occurred on either draw (each plane bit was 0 before).
+    CHECK_EQ((int)cpu.v[0xF], 0);
+}
+
+// -------- XO. Re-drawing the same pixel on a plane erases it and sets VF -----
+static void test_xo_draw_collision() {
+    std::printf("\n[test_xo_draw_collision]\n");
+    Chip8 cpu;
+    cpu.installISA(&ISA::xochip());
+    load(cpu, {
+        0x6000, 0x6100, 0xA300,
+        0xF101,                 // PLANE 1
+        0xD011, 0xD011,         // draw, then draw again on same plane/pixel
+        0x1210
+    });
+    cpu.mem.write(0x300, 0x80);   // sprite data, after load() (which resets RAM)
+    for (int i = 0; i < 6; ++i) cpu.cycle();
+    CHECK(!cpu.halted());
+    CHECK_EQ((int)cpu.display[0], 0);   // toggled off
+    CHECK_EQ((int)cpu.v[0xF], 1);       // collision on the second draw
+}
+
+// -------- XO. 5XY2 / 5XY3 save/load a register range, leaving I fixed -------
+static void test_xo_save_load_range() {
+    std::printf("\n[test_xo_save_load_range]\n");
+    // Opcode nibble layout is 5 X Y N. SAVE = N2 (0x5252 => x=2,y=5),
+    // LOAD = N3. Set V2..V5, point I at 0x400, SAVE the range, zero the
+    // registers, then LOAD them back — and confirm I never moves.
+    Chip8 c2;
+    c2.installISA(&ISA::xochip());
+    load(c2, {
+        0x62AA, 0x63BB, 0x64CC, 0x65DD,  // V2=AA V3=BB V4=CC V5=DD
+        0xA400,                          // I = 0x400
+        0x5252,                          // SAVE V2-V5  (5 x=2 y=5 n=2)
+        0x6200, 0x6300, 0x6400, 0x6500,  // clear V2..V5
+        0x5253,                          // LOAD V2-V5  (5 x=2 y=5 n=3)
+        0x1220
+    });
+    for (int i = 0; i < 6; ++i) c2.cycle();     // through SAVE
+    CHECK_EQ((int)c2.index, 0x400);             // I unchanged by SAVE
+    CHECK_EQ((int)c2.mem.peek(0x400), 0xAA);
+    CHECK_EQ((int)c2.mem.peek(0x403), 0xDD);
+    for (int i = 0; i < 5; ++i) c2.cycle();     // clears + LOAD
+    CHECK_EQ((int)c2.v[2], 0xAA);
+    CHECK_EQ((int)c2.v[5], 0xDD);
+    CHECK_EQ((int)c2.index, 0x400);             // I unchanged by LOAD
+}
+
+// -------- XO. 5XY2/5XY3 handle a descending range (X > Y) --------
+static void test_xo_save_load_descending() {
+    std::printf("\n[test_xo_save_load_descending]\n");
+    Chip8 cpu;
+    cpu.installISA(&ISA::xochip());
+    load(cpu, {
+        0x6105, 0x6206, 0x6307,          // V1=5 V2=6 V3=7
+        0xA500,                          // I = 0x500
+        0x5312,                          // SAVE V3-V1 (descending: x=3,y=1)
+        0x1210
+    });
+    for (int i = 0; i < 5; ++i) cpu.cycle();
+    // Stored order follows the register walk V3,V2,V1 => 7,6,5.
+    CHECK_EQ((int)cpu.mem.peek(0x500), 7);
+    CHECK_EQ((int)cpu.mem.peek(0x501), 6);
+    CHECK_EQ((int)cpu.mem.peek(0x502), 5);
+}
+
+// -------- XO. F000 NNNN long-load sets a full 16-bit I and skips 4 bytes ----
+static void test_xo_long_load() {
+    std::printf("\n[test_xo_long_load]\n");
+    Chip8 cpu;
+    cpu.installISA(&ISA::xochip());
+    // F000 1234  then  LD V0,0xAB  to prove PC resumed after the 4-byte op.
+    load(cpu, {0xF000, 0x1234, 0x60AB});
+    cpu.cycle();                       // the 4-byte long-load
+    CHECK(!cpu.halted());
+    CHECK_EQ((int)cpu.index, 0x1234);  // full 16-bit address (>4KB!)
+    CHECK_EQ((int)cpu.pc, 0x204);      // 0x200 + 4 bytes consumed
+    cpu.cycle();
+    CHECK_EQ((int)cpu.v[0], 0xAB);     // next instruction executed correctly
+}
+
+// -------- XO. >4KB addressing actually works on the widened memory --------
+static void test_xo_high_memory() {
+    std::printf("\n[test_xo_high_memory]\n");
+    Chip8 cpu;
+    cpu.installISA(&ISA::xochip());
+    load(cpu, {0xF000, 0x2000, 0xF065});  // I = 0x2000; LD V0,[I]
+    cpu.mem.write(0x2000, 0x5A);       // byte above the classic 4KB limit, after load()
+    cpu.cycle();
+    cpu.cycle();
+    CHECK(!cpu.halted());
+    CHECK_EQ((int)cpu.v[0], 0x5A);
+}
+
+// -------- XO. F002 loads the audio buffer; FX3A sets pitch --------
+static void test_xo_audio() {
+    std::printf("\n[test_xo_audio]\n");
+    Chip8 cpu;
+    cpu.installISA(&ISA::xochip());
+    load(cpu, {0xA600, 0xF002, 0x6580, 0xF53A});  // I=0x600; AUDIO; V5=0x80; PITCH V5
+    for (int i = 0; i < 16; ++i) cpu.mem.write(0x600 + i, static_cast<uint8_t>(i * 16));
+    cpu.cycle(); cpu.cycle(); cpu.cycle(); cpu.cycle();
+    CHECK(!cpu.halted());
+    CHECK_EQ((int)cpu.audio_pattern[0], 0x00);
+    CHECK_EQ((int)cpu.audio_pattern[15], 0xF0);
+    CHECK_EQ((int)cpu.audio_pitch, 0x80);
+}
+
+// -------- XO. Snapshot v4 round-trips the new extended state --------
+static void test_xo_snapshot_roundtrip() {
+    std::printf("\n[test_xo_snapshot_roundtrip]\n");
+    Chip8 cpu;
+    cpu.installISA(&ISA::xochip());
+    cpu.plane_mask = 3;
+    cpu.audio_pitch = 0x77;
+    cpu.audio_pattern[4] = 0xEE;
+    cpu.display[10] = 2;       // a plane-1 pixel
+    auto snap = cpu.snapshot();
+    CHECK_EQ((int)snap.version, 4);
+    Chip8 other;
+    other.plane_mask = 0; other.audio_pitch = 0; other.display[10] = 0;
+    other.restore(snap);
+    CHECK_EQ((int)other.plane_mask, 3);
+    CHECK_EQ((int)other.audio_pitch, 0x77);
+    CHECK_EQ((int)other.audio_pattern[4], 0xEE);
+    CHECK_EQ((int)other.display[10], 2);
+}
+
+// -------- XO. The MX-8 ISA must NOT decode XO save/load (sibling isolation) --
+static void test_mx8_rejects_xo_loadstore() {
+    std::printf("\n[test_mx8_rejects_xo_loadstore]\n");
+    // 5XY3 is SWAP under MX-8 but LOAD under XO-CHIP. Under MX-8 with the
+    // quirk on it must run as SWAP, not as an XO range-load. This proves the
+    // two extension sets stay mutually exclusive.
+    Chip8 cpu;
+    cpu.installISA(&ISA::mx8());
+    cpu.quirks.mx8_extensions = true;
+    load(cpu, {0x6211, 0x6599, 0x5253, 0x1206});   // V2=0x11; V5=0x99; SWAP V2,V5
+    cpu.cycle(); cpu.cycle(); cpu.cycle();
+    CHECK(!cpu.halted());
+    CHECK_EQ((int)cpu.v[2], 0x99);  // swapped, not loaded from memory
+    CHECK_EQ((int)cpu.v[5], 0x11);
+}
+
+// -------- XO. Disassembler renders the XO mnemonics --------
+static void test_xo_disassembly() {
+    std::printf("\n[test_xo_disassembly]\n");
+    auto& isa = ISA::xochip();
+    CHECK(isa.disassemble(0x5253) == "LOAD V2-V5");
+    CHECK(isa.disassemble(0x5252) == "SAVE V2-V5");
+    CHECK(isa.disassemble(0xF201) == "PLANE 2");
+    CHECK(isa.disassemble(0xF002) == "AUDIO");
+    CHECK(isa.disassemble(0xF53A) == "PITCH V5");
+    CHECK(isa.disassemble(0xF000) == "LD I, long");
+}
+
 int main() {
     test_rng_determinism();
     test_snapshot_rng();
@@ -993,6 +1197,18 @@ int main() {
     test_state_digest();
     test_state_digest_deterministic_program();
     test_rnd_mask();
+    // XO-CHIP
+    test_xo_plane_select();
+    test_xo_plane_aware_draw();
+    test_xo_draw_collision();
+    test_xo_save_load_range();
+    test_xo_save_load_descending();
+    test_xo_long_load();
+    test_xo_high_memory();
+    test_xo_audio();
+    test_xo_snapshot_roundtrip();
+    test_mx8_rejects_xo_loadstore();
+    test_xo_disassembly();
 
     if (g_failures > 0) {
         std::printf("\n%d FAILURE(S)\n", g_failures);

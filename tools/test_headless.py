@@ -44,6 +44,11 @@ GOLDEN: list[tuple[str, str, list[str], int, str | None]] = [
     # MX-8 demo halts at frame ~2 with EXIT — exit code 2 expected.
     # Hash captures the post-halt framebuffer (blank — no DRW in the demo).
     ("mx8_demo",          "roms/mx8_demo.ch8",  ["--mx8"],             5,   "0x86062D4C200833DF"),
+
+    # XO-CHIP demo: two overlapping sprites on separate bit-planes + a 16-bit
+    # long-load. Halts with EXIT (rc 2). Exercises the whole XO-CHIP path
+    # (plane select, plane-aware DRW, F000 long-load) in one golden.
+    ("xo_demo",           "roms/xo_demo.ch8",   ["--isa", "xochip"],   5,   "0xB8355919A23324AD"),
 ]
 
 HASH_RE = re.compile(r"hash=(0x[0-9A-Fa-f]+)")

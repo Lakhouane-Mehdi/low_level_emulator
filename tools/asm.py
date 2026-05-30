@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CHIP-8 / SUPER-CHIP assembler.
+CHIP-8 / SUPER-CHIP / MX-8 / XO-CHIP assembler.
 
 Two-pass: pass 1 sizes every line + records labels; pass 2 emits bytes.
 Output is a raw .ch8 ROM ready to load at 0x200.
@@ -21,6 +21,18 @@ Syntax (case-insensitive for mnemonics; labels case-sensitive):
 Standard CHIP-8 mnemonics (35 ops) + SUPER-CHIP extensions:
     SCD n  SCU n  SCR  SCL  EXIT  LOW  HIGH
     LD HF, Vx     LD R, Vx     LD Vx, R   (FX30 / FX75 / FX85)
+
+MX-8 extensions:
+    MUL Vx,Vy   DIV Vx,Vy   SWAP Vx,Vy   MEMCPY n   MEMSET n   RNDSEED n
+
+XO-CHIP extensions:
+    PLANE n          select draw-plane bitmask 0..3        (FN01)
+    SAVE Vx-Vy       store register range to [I]           (5XY2)
+    LOAD Vx-Vy       load  register range from [I]         (5XY3)
+    AUDIO            load 16-byte audio pattern from [I]    (F002)
+    PITCH Vx         set audio playback pitch               (FX3A)
+    LDLONG addr      i := long addr (4-byte 16-bit load)    (F000 NNNN)
+    (SCD/SCU/SCR/SCL are plane-aware under the XO-CHIP ISA.)
 
 Numbers: decimal (12), hex (0x12 / $12), binary (0b1010 / %1010).
 Vx registers: V0..VF (case-insensitive).
@@ -238,16 +250,20 @@ class Assembler:
                         raise self.err(ln, '.ascii needs a "string"')
                     ln.size = len(ln.operands[0]) - 2  # strip quotes
                 else:
-                    # all CHIP-8 ops are 2 bytes
-                    ln.size = 2
+                    # Almost all CHIP-8 ops are 2 bytes. The XO-CHIP long-load
+                    # (LD I, long ...) is the sole 4-byte instruction; it's
+                    # registered in OP_SIZES so pass1 lays out addresses right.
+                    ln.size = OP_SIZES.get(ln.op.upper(), 2)
             except AsmError:
                 raise
             except Exception as e:
                 raise self.err(ln, str(e))
 
             addr += ln.size
-            if addr > 0x1000:
-                raise self.err(ln, f"address overflow ({addr:#x} > 0x1000)")
+            # XO-CHIP widened the address space to 64KB; classic ROMs simply
+            # never approach the old 4KB line.
+            if addr > 0x10000:
+                raise self.err(ln, f"address overflow ({addr:#x} > 0x10000)")
 
     def _size_db(self, ln: Line, unit: int) -> int:
         if not ln.operands:
@@ -575,6 +591,56 @@ def enc_RNDSEED(a, ln, ops):
     return emit(0xF0 | (n - 1), 0x70)
 
 
+# ---- XO-CHIP extensions ----
+def enc_PLANE(a, ln, ops):
+    _need(1, ops, "PLANE")
+    n = a._resolve(ln, ops[0])
+    if not (0 <= n <= 3):
+        raise AsmError(f"PLANE mask must be 0..3, got {n}")
+    return emit(0xF0 | (n & 0x3), 0x01)
+
+def enc_AUDIO(a, ln, ops):
+    _need(0, ops, "AUDIO")
+    return emit(0xF0, 0x02)
+
+def enc_PITCH(a, ln, ops):
+    _need(1, ops, "PITCH"); x = parse_vreg(ops[0])
+    return emit(0xF0 | x, 0x3A)
+
+def enc_SAVE(a, ln, ops):
+    # SAVE Vx-Vy  (5XY2). Accept "Vx-Vy" as one token or two operands.
+    x, y = _parse_reg_range(ops, "SAVE")
+    return emit(0x50 | x, (y << 4) | 0x2)
+
+def enc_LOAD(a, ln, ops):
+    # LOAD Vx-Vy  (5XY3).
+    x, y = _parse_reg_range(ops, "LOAD")
+    return emit(0x50 | x, (y << 4) | 0x3)
+
+def enc_LDLONG(a, ln, ops):
+    # XO-CHIP long-load: F000 NNNN — a 4-byte instruction setting a full
+    # 16-bit I. Spelled "LDLONG addr" (the assembler's mnemonic for the
+    # i := long NNNN form). The operand may be a 16-bit label or constant.
+    _need(1, ops, "LDLONG")
+    addr = a._resolve(ln, ops[0]) & 0xFFFF
+    return bytes([0xF0, 0x00, (addr >> 8) & 0xFF, addr & 0xFF])
+
+def _parse_reg_range(ops, name):
+    # Accepts "Vx-Vy" (one token) or "Vx", "Vy" (two operands).
+    if len(ops) == 1 and "-" in ops[0]:
+        lhs, rhs = ops[0].split("-", 1)
+        return parse_vreg(lhs), parse_vreg(rhs)
+    if len(ops) == 2:
+        return parse_vreg(ops[0]), parse_vreg(ops[1])
+    raise AsmError(f"{name}: expected Vx-Vy (got {ops})")
+
+
+# Instructions whose encoding is not 2 bytes. pass1 consults this for layout.
+OP_SIZES = {
+    "LDLONG": 4,
+}
+
+
 ENCODERS = {
     "CLS": enc_CLS, "RET": enc_RET, "JP": enc_JP, "CALL": enc_CALL,
     "SE": enc_SE, "SNE": enc_SNE, "LD": enc_LD, "ADD": enc_ADD,
@@ -588,6 +654,9 @@ ENCODERS = {
     # MX-8 custom extensions:
     "MUL": enc_MUL, "DIV": enc_DIV, "SWAP": enc_SWAP,
     "MEMCPY": enc_MEMCPY, "MEMSET": enc_MEMSET, "RNDSEED": enc_RNDSEED,
+    # XO-CHIP extensions:
+    "PLANE": enc_PLANE, "AUDIO": enc_AUDIO, "PITCH": enc_PITCH,
+    "SAVE": enc_SAVE, "LOAD": enc_LOAD, "LDLONG": enc_LDLONG,
 }
 
 

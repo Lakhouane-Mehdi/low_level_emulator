@@ -393,9 +393,24 @@ void App::mainLoop() {
                 case K::F8: cpu_.quirks = Chip8::modernQuirks(); dbg.setStatusMessage("quirks -> MODERN"); break;
                 case K::F12: cpu_.quirks = Chip8::legacyQuirks(); dbg.setStatusMessage("quirks -> LEGACY (VIP)"); break;
                 case K::F11:
-                    cpu_.quirks.mx8_extensions = !cpu_.quirks.mx8_extensions;
-                    dbg.setStatusMessage(cpu_.quirks.mx8_extensions
-                        ? "MX-8 extensions: ON" : "MX-8 extensions: OFF");
+                    if (kp->shift) {
+                        // Shift+F11: switch the installed ISA to XO-CHIP, or
+                        // back to the configured ISA. MX-8 and XO-CHIP are
+                        // mutually exclusive (they fight over 5XY2/5XY3), so
+                        // this swaps the whole decoder rather than a quirk.
+                        const char* cur = cpu_.getISA() ? cpu_.getISA()->name() : "";
+                        if (std::string(cur) == "XO-CHIP") {
+                            cpu_.installISA(&ISA::by_name(cfg_.isa_name));
+                            dbg.setStatusMessage(std::string("ISA -> ") + cpu_.getISA()->name());
+                        } else {
+                            cpu_.installISA(&ISA::xochip());
+                            dbg.setStatusMessage("ISA -> XO-CHIP");
+                        }
+                    } else {
+                        cpu_.quirks.mx8_extensions = !cpu_.quirks.mx8_extensions;
+                        dbg.setStatusMessage(cpu_.quirks.mx8_extensions
+                            ? "MX-8 extensions: ON" : "MX-8 extensions: OFF");
+                    }
                     break;
                 case K::F10: {
                     // Cycle through built-in palettes.
@@ -465,6 +480,16 @@ void App::mainLoop() {
 
         // ---- output ----
         renderer.update(cpu_);
+        // Feed XO-CHIP audio state to the beep. For classic ROMs the pattern
+        // stays all-zero at its reset default, so setXoPattern marks silence
+        // and update() falls back to... nothing? No: classic ROMs never call
+        // F002, so xo_active_ stays false and the 440Hz square wave is used.
+        // We only push a pattern once a ROM has actually loaded one.
+        {
+            static const std::array<uint8_t, Chip8::AUDIO_PATTERN_BYTES> kZero{};
+            if (cpu_.audio_pattern != kZero)
+                beep.setXoPattern(cpu_.audio_pattern, cpu_.audio_pitch);
+        }
         beep.update(cpu_.sound_timer, paused_ || rewinding_ || muted_);
 
         window_.clear(sf::Color::Black);

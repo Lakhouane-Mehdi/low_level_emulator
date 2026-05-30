@@ -13,9 +13,12 @@ static void printUsage(const char* prog) {
         "  --speed N        Set CPU cycles per frame (1..2000). Default 12 (~720Hz).\n"
         "  --legacy         Start with COSMAC VIP quirks (instead of modern SCHIP).\n"
         "  --mx8            Enable MX-8 custom opcodes (MUL/DIV/SWAP/MEMCPY/MEMSET/RNDSEED).\n"
+        "  --xochip, --xo   Run in XO-CHIP mode (64KB RAM, 2 bit-planes, save/load\n"
+        "                   vx-vy, F000 long-load, plane select, audio). Same as\n"
+        "                   --isa xochip.\n"
         "  --seed N         Deterministic PRNG seed (any int64, hex with 0x prefix).\n"
-        "  --isa NAME       chip8 | schip | mx8 (default: mx8 — superset, gates MX-8\n"
-        "                   opcodes via the runtime quirk).\n"
+        "  --isa NAME       chip8 | schip | mx8 | xochip (default: mx8 — superset,\n"
+        "                   gates MX-8 opcodes via the runtime quirk).\n"
         "  --paused         Start paused.\n"
         "  --roms-dir DIR   Directory to scan for the ROM picker (default: roms).\n"
         "  --rewind-sec N   Seconds of rewind history (default: 30).\n"
@@ -48,6 +51,7 @@ int main(int argc, char* argv[]) {
         else if (a == "--speed")        cfg.cycles_per_frame = std::atoi(needArg("--speed"));
         else if (a == "--legacy")       cfg.legacy_quirks = true;
         else if (a == "--mx8")          cfg.mx8_extensions = true;
+        else if (a == "--xochip" || a == "--xo")  cfg.isa_name = "xochip";
         else if (a == "--seed") {
             cfg.rng_seed = std::strtoll(needArg("--seed"), nullptr, 0);
         }

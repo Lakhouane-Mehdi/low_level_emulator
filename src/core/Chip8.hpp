@@ -52,7 +52,12 @@ public:
     static constexpr int DISPLAY_HEIGHT = 64;
     static constexpr int LORES_WIDTH    = 64;
     static constexpr int LORES_HEIGHT   = 32;
-    static constexpr int MEMORY_SIZE    = 4096;
+    // 64KB address space (XO-CHIP). Classic CHIP-8 / SCHIP only use the low
+    // 4KB; the rest is dormant unless an XO-CHIP ROM addresses it via the
+    // F000 NNNN long-load. See Memory::SIZE for the rationale.
+    static constexpr int MEMORY_SIZE    = 65536;
+    static constexpr int PLANE_COUNT    = 2;     // XO-CHIP: 2 bit-planes -> 4 colors
+    static constexpr int AUDIO_PATTERN_BYTES = 16;  // XO-CHIP F002 sample buffer
     static constexpr int REGISTER_COUNT = 16;
     static constexpr int STACK_SIZE     = 16;
     static constexpr int KEY_COUNT      = 16;
@@ -104,6 +109,20 @@ public:
     bool       hires{};
     bool       waiting_vblank{};
     HaltReason halt_reason{HaltReason::Running};
+
+    // ---- XO-CHIP extended state ----
+    // Each display[] cell now holds a 2-bit plane bitmask (bit p set => that
+    // pixel is lit on plane p). For classic CHIP-8 / SCHIP only plane 0 is
+    // ever used, so a lit pixel is value 1 (nonzero) exactly as before — the
+    // framebuffer hash and renderer "nonzero = on" semantics are preserved.
+    //
+    // plane_mask selects which planes DXYN / CLS / scroll affect (FN01). It
+    // defaults to 1 (plane 0 only) so non-XO ROMs behave identically.
+    uint8_t    plane_mask{1};
+    // Audio: 16-byte (128-bit) pattern buffer + playback pitch (FX3A). The
+    // sound timer still gates whether audio plays; pattern + pitch shape it.
+    std::array<uint8_t, AUDIO_PATTERN_BYTES> audio_pattern{};
+    uint8_t    audio_pitch{64};   // XO-CHIP default pitch (4000Hz playback rate)
 
     Quirks     quirks{};
 
@@ -158,7 +177,8 @@ public:
         // v2 = original
         // v3 = added xoshiro256** RNG state + keypad state for full
         //      deterministic replay (rewind through key-hold moments).
-        static constexpr uint16_t VERSION = 3;
+        // v4 = XO-CHIP: 64KB memory, plane_mask, audio pattern + pitch.
+        static constexpr uint16_t VERSION = 4;
 
         uint32_t magic{MAGIC};
         uint16_t version{VERSION};
@@ -178,6 +198,11 @@ public:
         Quirks   quirks{};
         Xoshiro256ss rng{};                  // v3: PRNG state for replay determinism
         std::array<uint8_t, KEY_COUNT> keys{};  // v3: keypad latch for faithful rewind
+        // v4: XO-CHIP extended state. Defaults reproduce classic behavior so
+        // a v3 snapshot loaded into a v4 build (handled in restore) is exact.
+        uint8_t  plane_mask{1};
+        std::array<uint8_t, AUDIO_PATTERN_BYTES> audio_pattern{};
+        uint8_t  audio_pitch{64};
     };
     Snapshot snapshot() const;
     void restore(const Snapshot& s);
@@ -261,8 +286,18 @@ public:
 
     // The heart of DXYN. All sprite drawing — base 8xN, SCHIP 16x16,
     // clip-vs-wrap, VF collision flag, display_wait latch — lives here so
-    // ISAs don't reimplement framebuffer manipulation.
+    // ISAs don't reimplement framebuffer manipulation. Honors plane_mask:
+    // for classic ROMs plane_mask is 1, so this is identical to before.
     void drawSprite(uint8_t vx, uint8_t vy, uint8_t n);
+
+    // XO-CHIP plane-aware scrolls. Unlike the SCHIP scrolls (which move the
+    // whole framebuffer), these shift only the pixels on the currently
+    // selected planes, leaving other planes in place. scrollDownPlanes also
+    // covers 00DN scroll-up via a negative interpretation in the caller.
+    void scrollDownPlanes(int lines);
+    void scrollUpPlanes(int lines);
+    void scrollRightPlanes(int pixels);
+    void scrollLeftPlanes(int pixels);
 
 private:
     void recordTrace(uint16_t pc, uint16_t op);

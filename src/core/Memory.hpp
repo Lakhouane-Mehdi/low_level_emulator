@@ -20,7 +20,12 @@
 // Throwing was rejected because reads happen in tight opcode dispatch.
 class Memory {
 public:
-    static constexpr std::size_t SIZE = 4096;
+    // XO-CHIP extends the address space to 16 bits (64KB). Classic CHIP-8 and
+    // SUPER-CHIP ROMs only ever touch the low 4KB, so they are unaffected:
+    // the extra space is simply never addressed. Snapshots grow to match, but
+    // the active framebuffer hash (the value golden tests pin) is unchanged
+    // because it only covers the visible display region, never RAM.
+    static constexpr std::size_t SIZE = 65536;
 
     enum class WatchKind : uint8_t { Read = 1, Write = 2, Both = 3 };
 

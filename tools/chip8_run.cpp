@@ -65,7 +65,7 @@ void usage(const char* prog) {
         "  --frames N             Frames to run (required for ROM mode; > 0).\n"
         "  --cycles-per-frame N   CPU cycles per emulator frame (default 12).\n"
         "  --seed N               Deterministic PRNG seed (int64; default: boot entropy).\n"
-        "  --isa NAME             chip8 | schip | mx8 (default: mx8).\n"
+        "  --isa NAME             chip8 | schip | mx8 | xochip (default: mx8).\n"
         "  --quirks PRESET        modern | legacy (default: modern).\n"
         "  --mx8                  Enable MX-8 extensions (gates 5XY1.. / FX50..).\n"
         "  --replay file.json     Replay mode: load ROM/ISA/quirks/seed/events from file.\n"

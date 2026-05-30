@@ -1,8 +1,8 @@
-# CHIP-8 / SUPER-CHIP / MX-8 Emulator
+# CHIP-8 / SUPER-CHIP / MX-8 / XO-CHIP Emulator
 
 A C++17 emulator + interactive debugger + Python assembler for CHIP-8,
-SUPER-CHIP 1.1, and **MX-8** — six original opcodes layered on top of the
-classic ISA.
+SUPER-CHIP 1.1, **MX-8** (six original opcodes layered on the classic ISA),
+and **XO-CHIP** (Octo's 64KB / two-bit-plane / 4-color extension).
 
 ![CHIP-8 emulator running IBM Logo with the live debugger sidebar](screenshots/debugger.png)
 
@@ -11,7 +11,8 @@ classic ISA.
 - **Pure emulator core** in `src/core/` (no graphics, no I/O coupling).
   35 standard CHIP-8 opcodes + the full SUPER-CHIP 1.1 set (hi-res 128x64,
   16x16 sprites, scroll D/U/L/R, big font, RPL flags, exit) +
-  6 MX-8 extensions.
+  6 MX-8 extensions + the **XO-CHIP** set (64KB RAM, 2 bit-planes / 4 colors,
+  `save/load vx-vy`, `i := long`, plane select, plane-aware scroll, audio).
 - **Live debugger sidebar**: registers, disassembly with breakpoint markers,
   stack, three memory panes, instruction trace ring buffer, status line.
 - **Real debugger controls**: pause / step / step-over CALL / step-out,
@@ -23,8 +24,8 @@ classic ISA.
 - **7 color palettes** (F10 cycles, or `--palette name`).
 - **ROM browser** with paging, scroll, click-to-pick.
 - **Python assembler** at `tools/asm.py` — labels, .org, .db, .dw, .ascii,
-  .equ, full CHIP-8 + SCHIP + MX-8 mnemonics. Includes a self-test
-  (`tools/test_asm.py`) covering all 54 opcodes.
+  .equ, full CHIP-8 + SCHIP + MX-8 + XO-CHIP mnemonics (incl. the 4-byte
+  `LDLONG`). Includes a self-test (`tools/test_asm.py`).
 - **Cross-platform font fallback** — bundled / Windows / Linux / macOS paths.
 - **Configurable speed** (1..2000 cycles/frame, live `+/-`).
 
@@ -65,6 +66,7 @@ CLI:
 | `--speed N`        | CPU cycles per frame (1..2000, default 12) |
 | `--legacy`         | Boot with COSMAC VIP quirks |
 | `--mx8`            | Enable MX-8 custom opcodes from start |
+| `--xochip`, `--xo` | Run in XO-CHIP mode (= `--isa xochip`) |
 | `--paused`         | Boot paused |
 | `--palette NAME`   | mono / amber / green / gameboy / c64 / ice / hotdog |
 | `--rewind-sec N`   | Seconds of rewind history (default 5) |
@@ -99,6 +101,7 @@ A 0 B F          Z X C V
 | `F8`            | Quirks → MODERN preset (SCHIP) |
 | `F12`           | Quirks → LEGACY preset (COSMAC VIP) |
 | `F11`           | Toggle MX-8 extensions |
+| `Shift+F11`     | Swap ISA to XO-CHIP (and back to the configured ISA) |
 | `F10`           | Cycle palette |
 | `F5` / `F9`     | Save / load state |
 | `Backspace` (hold) | Rewind |
@@ -126,12 +129,55 @@ slots so they can't collide with classic CHIP-8 / SCHIP ROMs:
 These plug holes the original ISA leaves: there's no native multiply, no
 fast block fill/copy, and no way to make RNG deterministic for testing.
 
+## XO-CHIP
+
+XO-CHIP is the de-facto modern CHIP-8 extension (popularized by Octo). Run a
+ROM with `--xochip` / `--isa xochip`, or toggle at runtime with `Shift+F11`.
+It is a **sibling** ISA of MX-8, not a superset — both claim the `5XY2`/`5XY3`
+slots with incompatible meanings, so a machine runs one or the other.
+
+What it adds on top of SUPER-CHIP:
+
+| Opcode      | Mnemonic        | Effect                                                  |
+|-------------|-----------------|--------------------------------------------------------|
+| `FN01`      | `PLANE n`       | Select draw-plane bitmask `n` (0..3) — 2 planes = 4 colors |
+| `5XY2`      | `SAVE Vx-Vy`    | Store register range `Vx..Vy` to `[I]` (I unchanged)   |
+| `5XY3`      | `LOAD Vx-Vy`    | Load register range `Vx..Vy` from `[I]` (I unchanged)  |
+| `F000 NNNN` | `LDLONG addr`   | 4-byte op: load a full **16-bit** address into I       |
+| `F002`      | `AUDIO`         | Load the 16-byte audio pattern buffer from `[I]`       |
+| `FX3A`      | `PITCH Vx`      | Set audio playback pitch (rate = `4000·2^((pitch-64)/48)` Hz) |
+| `00CN/00DN` | `SCD/SCU n`     | Scroll down/up — **plane-aware** (only selected planes) |
+| `00FB/00FC` | `SCR/SCL`       | Scroll right/left 4px — plane-aware                     |
+| `DXYN`      | `DRW`           | Plane-aware: draws sprite data to each selected plane   |
+
+Concretely, this brings:
+
+- **64KB memory.** The address space widens from 4KB to 64KB; `LDLONG`
+  reaches it. Classic ROMs never touch beyond 4KB, so nothing changes for
+  them — and the framebuffer-hash golden tests stay byte-identical.
+- **Two bit-planes → four colors.** Each framebuffer cell stores a 2-bit
+  plane mask. The renderer maps `0/1/2/3` to a four-color ramp derived from
+  the active palette. A classic ROM only ever lights plane 0, so it renders
+  exactly as before.
+- **Real audio.** `AUDIO` + `PITCH` synthesize the 128-bit pattern buffer at
+  the pitch-derived rate instead of a fixed 440Hz beep.
+
+All of this is in deterministic snapshot v4, so rewind / replay / `--diff-replay`
+cover XO-CHIP state (planes + audio) the same way they cover the classic core.
+See [src/core/isa/Xo8ISA.cpp](src/core/isa/Xo8ISA.cpp) and the `test_xo_*`
+cases in [tests/core_test.cpp](tests/core_test.cpp).
+
+A worked example lives in [demos/xo_demo.asm](demos/xo_demo.asm) (two
+overlapping sprites on separate planes + a long-load); it's wired into the
+headless golden suite as `xo_demo`.
+
 ## Assembler
 
 ```
 python tools/asm.py demos/hello.asm -o demos/hello.ch8
 python tools/asm.py demos/maze.asm  --listing --symbols
-python tools/test_asm.py                        # self-test, 54 cases
+python tools/asm.py demos/xo_demo.asm -o roms/xo_demo.ch8   # XO-CHIP demo
+python tools/test_asm.py                        # opcode self-test
 ```
 
 Syntax:
@@ -151,7 +197,7 @@ sprite:
 
 Numbers: `12`, `0x12`, `$12`, `0b1010`, `%1010`. Labels are case-sensitive.
 Mnemonics are case-insensitive. See `demos/*.asm` for working examples
-(`hello`, `maze`, `bounce`, `mx8_demo`).
+(`hello`, `maze`, `bounce`, `mx8_demo`, `xo_demo`).
 
 ## Event-driven state mutation
 
@@ -268,7 +314,7 @@ framebuffer + memory + V0..VF + stack + RNG state + scalar fields
 ```
 src/
   core/      Chip8, Memory, CoreEvents, Disassembler   # pure emulator, no SFML
-  core/isa/  IInstructionSet, Chip8ISA, SchipISA, Mx8ISA
+  core/isa/  IInstructionSet, Chip8ISA, SchipISA, Mx8ISA, Xo8ISA
   ui/        Renderer, Input, AudioBeep, DebugView, RomBrowser, FontLoader
   app/       Config, App                # main loop + orchestration
   main.cpp                              # tiny CLI entry point

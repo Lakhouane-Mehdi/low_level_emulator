@@ -5,6 +5,8 @@
 
 #include <SFML/Graphics.hpp>
 
+#include <array>
+
 // Maps the CHIP-8 framebuffer to an SFML sprite.
 // Owns the texture/image; recreates them on demand when the palette changes.
 class Renderer {
@@ -28,6 +30,13 @@ private:
     uint32_t      color_on_;
     uint32_t      color_off_;
     bool          last_hires_ = false;
+
+    // XO-CHIP four-color lookup, indexed by the per-pixel plane bitmask:
+    //   0 = background (off), 1 = plane 0, 2 = plane 1, 3 = both planes.
+    // For classic ROMs only indices 0 and 1 are ever produced, so the
+    // display is identical to the two-color path. Rebuilt in setPalette.
+    std::array<sf::Color, 4> plane_colors_{};
+    void rebuildPlaneColors();
 
     static sf::Color toSfColor(uint32_t rgba);
 };

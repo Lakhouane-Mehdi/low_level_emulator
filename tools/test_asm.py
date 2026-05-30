@@ -65,6 +65,15 @@ CASES = [
     ("MEMCPY 16",     "FF50"),
     ("MEMSET 4",      "F360"),
     ("RNDSEED 4",     "F370"),
+    # XO-CHIP extensions
+    ("PLANE 2",       "F201"),
+    ("PLANE 0",       "F001"),
+    ("AUDIO",         "F002"),
+    ("PITCH V5",      "F53A"),
+    ("SAVE V2-V5",    "5252"),
+    ("LOAD V2-V5",    "5253"),
+    ("SAVE V2, V5",   "5252"),
+    ("LDLONG 0x1234", "F0001234"),
 ]
 
 def asm_one(src: str) -> bytes:

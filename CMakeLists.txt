@@ -24,6 +24,7 @@ add_executable(chip8
     src/core/isa/Chip8ISA.cpp
     src/core/isa/SchipISA.cpp
     src/core/isa/Mx8ISA.cpp
+    src/core/isa/Xo8ISA.cpp
     src/ui/Renderer.cpp
     src/ui/Input.cpp
     src/ui/AudioBeep.cpp
@@ -68,6 +69,7 @@ set(CHIP8_CORE_SOURCES
     src/core/isa/Chip8ISA.cpp
     src/core/isa/SchipISA.cpp
     src/core/isa/Mx8ISA.cpp
+    src/core/isa/Xo8ISA.cpp
 )
 
 # Headless core test runner — no SFML, links only against src/core/.

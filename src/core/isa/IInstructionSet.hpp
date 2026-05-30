@@ -18,8 +18,12 @@ class Chip8;
 // ISA. (In practice we swap on ROM load, not mid-execution.)
 //
 // Composition pattern: SchipISA inherits from Chip8ISA and only overrides
-// the slots SCHIP extends. Mx8ISA inherits from SchipISA. New experiments
-// can subclass any of these.
+// the slots SCHIP extends. Mx8ISA and Xo8ISA are SIBLINGS — both inherit
+// from SchipISA, not from each other, because MX-8 and XO-CHIP both claim
+// the 5XY2/5XY3 opcode slots with incompatible meanings (MX-8: DIV/SWAP;
+// XO-CHIP: save/load vx-vy). Keeping them sibling subclasses makes the two
+// extension sets mutually exclusive, exactly as a real machine would treat
+// them. New experiments can subclass any of these.
 class IInstructionSet {
 public:
     virtual ~IInstructionSet() = default;
@@ -42,6 +46,7 @@ namespace ISA {
     IInstructionSet& chip8();
     IInstructionSet& schip();
     IInstructionSet& mx8();
+    IInstructionSet& xochip();
 
     // Pick by name (case-insensitive). Falls back to schip() on miss.
     IInstructionSet& by_name(const std::string& name);
